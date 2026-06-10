@@ -22,49 +22,56 @@ junk
   - OR spam: promo URLs (https://, t.me/), vote-rigging or rank-game phrases ("top 1", "#1 rank").
 
 config_feedback
-  - Generic agent infrastructure / automated metric: uptime, liveness, response time, oracle
-    dimensions (trustscore, counterparty, activity, longevity, contractrisk paired with
-    sentinelnet-v1), dated validation periods.
-  - "Generic" = the tag would make sense for ANY agent regardless of business.
+  - An automated, generic infrastructure metric: uptime, liveness, response time, oracle
+    dimensions, dated validation periods, protocol-level probes.
+  - ASK: would this tag make sense for ANY agent regardless of its business domain?
+    If yes → config_feedback.
 
 app_specific
-  - The tag belongs to the agent's BUSINESS / domain operation it performs (token swaps, vault
-    deposits, soul fragments, miner-vouch, generation tasks, …)
-  - OR the tag is a numeric/statistical signal: rate, currency amount, percentage, P/L,
-    counter, statistic. Tier (`<scale>`) can be `unbounded` here.
+  - The tag names a DOMAIN OPERATION (something the agent DID) or a DOMAIN OUTCOME METRIC
+    (a measurable quantity of what was produced — completion count, trade volume, vouch count,
+    order count, P/L amount, …).
+  - The value records WHAT HAPPENED / HOW MUCH: an outcome, count, or rate of occurrence —
+    NOT how good it was.
+  - The agent_domain signal helps: a tag naming a concept inside agent_domain that reads as
+    an action/event/outcome measurement → app_specific.
+  - `<scale>` can be anything including pct100 — a 96% completion rate is app_specific.
 
 service_feedback
-  - The tag is a quality evaluation of the agent (adjective, sentiment, full-sentence
-    praise/criticism) OR a quality dimension within the agent's domain.
-  - Tier (`<scale>`) is pct100 or below (binary / star5 / star10 / pct100). NOT unbounded.
+  - The tag is a QUALITY JUDGMENT about the agent: an adjective (fast, reliable, excellent),
+    sentiment, a satisfaction score, or full-sentence praise/criticism.
+  - Tags MAY be domain-related — when the score rates HOW GOOD a domain aspect was
+    (e.g., accuracy of trade calls, signal reliability, execution quality), it is
+    service_feedback even if both tags name domain concepts.
+  - The distinguishing question: does the value rate QUALITY (how good?) or measure OUTCOME
+    (how much/many?)  → Quality rating = service_feedback; Outcome measurement = app_specific.
+
+SCALE IS A SECONDARY SIGNAL — do NOT use it as the primary discriminator:
+  - `unbounded` → almost always app_specific (counts/amounts have no natural ceiling).
+  - `pct100` / `binary` → could be either; apply the quality-vs-outcome test above.
 
 EVALUATION ORDER — stop at the FIRST matching category:
   1) junk
-  2) config_feedback
-  3) app_specific
-  4) service_feedback
+  2) config_feedback   (generic infra / automated probe)
+  3) app_specific      (domain operation or domain metric)
+  4) service_feedback  (quality judgment / sentiment)
 
 USING SIGNALS
 
-`<agent_domain>` is the canonical "what this agent does" bundle (service names sans generic
-plumbing + OASF domains + OASF skills + tags). Use it to decide whether an ambiguous tag belongs
-to the agent's business: tag inside agent_domain → app_specific or service_feedback (pick based
-on whether it is an operation/metric vs a quality judgment); tag outside agent_domain and not
-infra → likely service_feedback if it is an adjective, otherwise lean config_feedback.
+`<agent_domain>` — the canonical "what this agent does" bundle (service names excluding
+generic plumbing like Web/Email/A2A + OASF domains + OASF skills + tags).
+  - Tag inside agent_domain + reads as an action/event/outcome measurement → app_specific.
+  - Tag inside agent_domain + rates quality of that domain aspect (how good?) → service_feedback.
+  - Tag is a quality adjective/sentiment regardless of domain → service_feedback.
+  - Tag is outside agent_domain and not generic infra → service_feedback if adjective,
+    lean config_feedback otherwise.
 
-`<scale>` tier:
-  - `unbounded` → almost always app_specific (statistic with no upper bound).
-  - `binary` / `star5` / `star10` / `pct100` → can be service_feedback or config_feedback.
-    Quality adjective / sentiment → service_feedback. Automated metric / probe → config_feedback.
-
-`<endpoint_matched>` — when present and `True`, the feedback targets a real service that the
-agent registered. Junk is excluded for these records (enforced separately by the host).
-Pick from {config_feedback, app_specific, service_feedback}.
+`<endpoint_matched>` — when `True`, the feedback targets a registered service endpoint.
+Junk is excluded for these records (enforced by the host). Pick from {config, app, service}.
 
 CONFIDENCE
-  - Commit confidence > 0.80 ONLY when the signals clearly support the category.
-  - When evidence is thin, output your best-guess category with a lower confidence — do NOT
-    output "others" (the host stores "others" separately when rules cannot cover the row).
+  - Confidence > 0.80 when signals clearly support the category.
+  - When evidence is thin output your best-guess with lower confidence — do NOT output "others".
 
 OUTPUT — strict JSON, one line, no markdown, no fences:
 {"category":"<one>","confidence":0.00,"reason":"<one short sentence>"}
@@ -78,45 +85,54 @@ EXAMPLES:
 <feedback><tag1>get top 1 rank</tag1><tag2>t.me/agent_bldr</tag2></feedback>
 => {"category":"junk","confidence":0.99,"reason":"telegram link and rank-game phrase"}
 
-# junk — placeholder
+# junk — placeholder tokens
 <feedback><tag1>test</tag1><tag2>asd</tag2></feedback>
-=> {"category":"junk","confidence":0.95,"reason":"placeholder tokens"}
+=> {"category":"junk","confidence":0.95,"reason":"placeholder tokens with no semantic signal"}
 
-# junk — both tags all digits, no semantic signal
-<feedback><tag1>123</tag1><tag2>456</tag2></feedback>
-=> {"category":"junk","confidence":0.85,"reason":"both tags are bare numbers, no meaning"}
-
-# config_feedback — generic infra probe
+# config_feedback — generic infra probe (would apply to ANY agent)
 <feedback><tag1>liveness</tag1><tag2>liveness-check</tag2><scale>binary</scale></feedback>
-=> {"category":"config_feedback","confidence":0.96,"reason":"liveness infra probe"}
+=> {"category":"config_feedback","confidence":0.96,"reason":"liveness infra probe, generic across all agents"}
 
-# config_feedback — oracle dimension (SentinelNet)
-<feedback><tag1>contractrisk</tag1><tag2>sentinelnet-v1</tag2><scale>pct100</scale></feedback>
-<agent><agent_domain>defi, trading</agent_domain></agent>
-=> {"category":"config_feedback","confidence":0.92,"reason":"automated oracle risk dimension, generic"}
+# config_feedback — oracle dimension; tag2 names the probe protocol → generic infra regardless of agent domain
+<feedback><tag1>trust</tag1><tag2>oracle-screening</tag2><scale>pct100</scale></feedback>
+<agent><agent_domain>financial_services/trading, signals</agent_domain></agent>
+=> {"category":"config_feedback","confidence":0.94,"reason":"oracle-screening is an automated infra probe, not a quality judgment about this agent"}
 
-# app_specific — token swap inside agent domain
-<feedback><tag1>CADm</tag1><tag2>buy</tag2><scale>unbounded</scale></feedback>
+# app_specific — domain OPERATION (agent did a trade); scale=binary does not make this infra
+<feedback><tag1>trade</tag1><tag2></tag2><scale>binay</scale></feedback>
 <agent><agent_domain>celofx, financial_services/trading, defi, forex</agent_domain></agent>
-=> {"category":"app_specific","confidence":0.93,"reason":"forex token + trade verb on broker agent, unbounded tier"}
+=> {"category":"app_specific","confidence":0.92,"reason":"trade is a domain operation on a trading agent, not a generic infra probe"}
 
-# app_specific — soul-dimension fragment
-<feedback><tag1>stance</tag1><tag2>fragment</tag2></feedback>
-=> {"category":"app_specific","confidence":0.93,"reason":"soul-dimension fragment update"}
+# app_specific — domain METRIC with pct100; pct100 alone does NOT imply service_feedback
+<feedback><tag1>personality</tag1><tag2>fragment</tag2><scale>pct100</scale></feedback>
+<agent><agent_domain>ensoul, digital_soul, nft</agent_domain></agent>
+=> {"category":"app_specific","confidence":0.93,"reason":"soul-dimension fragment is a domain operation (Digital Soul protocol), not a quality adjective"}
 
-# app_specific — domain-related numeric/statistic with unbounded tier
-<feedback><tag1>miner-vouch</tag1><tag2>botcoin</tag2><scale>binary</scale></feedback>
+# app_specific — domain metric; 96% completion rate is a measurable outcome, not a quality adjective
+<feedback><tag1>miner-vouch</tag1><tag2>botcoin</tag2><scale>pct100</scale></feedback>
 <agent><agent_domain>botcoin, mining</agent_domain></agent>
-=> {"category":"app_specific","confidence":0.88,"reason":"vouch op tied to agent mining/token domain"}
+=> {"category":"app_specific","confidence":0.90,"reason":"vouch operation tied to agent's mining domain, pct100 is the completion rate not a satisfaction score"}
 
-# service_feedback — full-sentence quality praise within the agent's domain
-<feedback><tag1>quality</tag1><tag2>BTC long call at 97k was spot on. Cross-market coverage is unmatched.</tag2><scale>pct100</scale><endpoint_matched>True</endpoint_matched></feedback>
-<agent><agent_domain>celofx, financial_services/trading, defi</agent_domain></agent>
-=> {"category":"service_feedback","confidence":0.92,"reason":"quality praise on trading signals, endpoint matches agent service"}
-
-# service_feedback — quality adjective
+# service_feedback — quality ADJECTIVE; 'helpful' and 'fast' name how good the service was, not what it did
 <feedback><tag1>helpful</tag1><tag2>fast</tag2><scale>pct100</scale></feedback>
-=> {"category":"service_feedback","confidence":0.88,"reason":"quality adjectives, pct100 tier"}
+=> {"category":"service_feedback","confidence":0.88,"reason":"quality adjectives describing service satisfaction, not a domain operation"}
+
+# service_feedback — full-sentence quality praise; tag2 is sentiment, not an operation
+<feedback><tag1>quality</tag1><tag2>BTC long call at 97k was spot on.</tag2><scale>pct100</scale><endpoint_matched>True</endpoint_matched></feedback>
+<agent><agent_domain>celofx, financial_services/trading, defi</agent_domain></agent>
+=> {"category":"service_feedback","confidence":0.93,"reason":"full-sentence quality praise about trading signals, sentiment not a domain operation"}
+
+# service_feedback — both tags domain-related but score RATES quality of a domain aspect
+<feedback><tag1>signal-accuracy</tag1><tag2>trade-calls</tag2><scale>pct100</scale></feedback>
+<agent><agent_domain>financial_services/trading, defi, signals</agent_domain></agent>
+=> {"category":"service_feedback","confidence":0.87,"reason":"rates how accurate the agent's signals were — quality evaluation of domain performance, not a completion count"}
+
+# service_feedback vs app_specific — same domain (trading), different intent:
+#   'reliability' rates quality → service_feedback
+#   'trade' records an outcome → app_specific
+<feedback><tag1>reliability</tag1><tag2>top-tier-logic</tag2><scale>pct100</scale></feedback>
+<agent><agent_domain>financial_services/trading, defi</agent_domain></agent>
+=> {"category":"service_feedback","confidence":0.87,"reason":"reliability rates the quality of the agent's logic, not a domain outcome measurement"}
 """
 
 

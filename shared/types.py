@@ -31,11 +31,12 @@ ALL_CATEGORIES: list[str] = LLM_OUTPUT_CATEGORIES + [Category.OTHERS.value]
 SCORED_CATEGORIES: list[str] = LLM_OUTPUT_CATEGORIES
 
 
-# Mapping from legacy 6-category rule labels stored in Mongo to the data labels.
+# Mapping from rule labels stored in Mongo to the data labels.
+# The runtime rule engine writes `junk` directly (spam/noise are merged before
+# persistence); the legacy spam/noise keys are kept for any pre-merge rows.
 # `others` stays as a source bucket so those rows can be handed to the LLM.
 RULE_TO_5CAT: dict[str, str] = {
-    "spam": Category.JUNK.value,
-    "noise": Category.JUNK.value,
+    "junk": Category.JUNK.value,
     "service_feedback": Category.SERVICE_FEEDBACK.value,
     "config_feedback": Category.CONFIG_FEEDBACK.value,
     "app_specific": Category.APP_SPECIFIC.value,

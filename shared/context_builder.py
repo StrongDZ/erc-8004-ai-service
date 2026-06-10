@@ -4,7 +4,7 @@ The Go backend (`internal/domain/classifier/humanize.go`) does this in
 ad-hoc form per prompt version. The Python port reorganises into a single
 context dict consumed by every approach, with three design changes:
 
-1. services → flat `name:endpoint` strings (instead of full JSON blob)
+1. agent_domain → service names only (generic web/OASF/A2A/email stripped) + OASF paths + tags
 2. oasfDomains/Skills → top-K shallow hierarchical paths (avoids BSCAI-style flood)
 3. description → use `agentSummary` field if present (filled by 02_agent_summary
    notebook); fall back to truncated description.
@@ -50,6 +50,19 @@ def format_services(services: Iterable[dict], max_services: int = 5) -> str:
     return " | ".join(out)
 
 
+def format_service_names(services: Iterable[dict], max_services: int = 5) -> str:
+    """Format services list as 'name1, name2, ...' (names only, no endpoints)."""
+    out: list[str] = []
+    for svc in services:
+        name = (svc.get("name") or "").strip() if isinstance(svc, dict) else (getattr(svc, "name", "") or "").strip()
+        if not name:
+            continue
+        out.append(name)
+        if len(out) >= max_services:
+            break
+    return ", ".join(out)
+
+
 def _normalize_url(u: str) -> str:
     """Lowercase + strip trailing slash for endpoint comparison."""
     return (u or "").strip().lower().rstrip("/")
@@ -73,6 +86,20 @@ def endpoint_matches_services(feedback_endpoint: str, services: Iterable[dict]) 
         if fe == se or fe in se or se in fe:
             return True
     return False
+
+
+def find_matched_service(feedback_endpoint: str, services: Iterable[dict]) -> dict | None:
+    """Return the first service whose endpoint matches the feedback endpoint, or None."""
+    fe = _normalize_url(feedback_endpoint)
+    if not fe:
+        return None
+    for svc in services:
+        se = _normalize_url(svc.get("endpoint", "") if isinstance(svc, dict) else getattr(svc, "endpoint", ""))
+        if not se:
+            continue
+        if fe == se or fe in se or se in fe:
+            return svc if isinstance(svc, dict) else svc.__dict__
+    return None
 
 
 def domain_service_names(services: Iterable[dict], max_names: int = 5) -> list[str]:
@@ -158,7 +185,7 @@ def agent_block(agent: AgentMeta, domains_k: int = 3, skills_k: int = 5) -> dict
     return {
         "name": agent.name,
         "summary": summary,
-        "services": format_services(agent.services),
+        "services": format_service_names(agent.services or []),
         "domains": ", ".join(dom["oasf_domains"]),
         "skills": ", ".join(dom["oasf_skills"]),
         "tags": ", ".join(dom["tags"]),
@@ -174,11 +201,11 @@ def feedback_block(
 ) -> dict:
     """Compact feedback context dict.
 
-    When `agent` is provided, this also computes `endpoint_matched`: True when
-    the feedback's endpoint matches any of the agent's registered service
-    endpoints. Downstream, an endpoint match means the feedback targets a real
-    service the agent owns, so classification is restricted to
-    {config_feedback, app_specific, service_feedback}.
+    When `agent` is provided, this also computes `endpoint_matched`: set to the
+    matched service's "name:endpoint" string when the feedback endpoint matches
+    one of the agent's registered services, absent otherwise. Downstream, a
+    match means the feedback targets a real service the agent owns, so
+    classification is restricted to {config_feedback, app_specific, service_feedback}.
 
     feedbackParsed is included ONLY when both tag1 and tag2 are empty (the user's
     rule: "production classifies on tag1/tag2 if they exist; offchain is the
@@ -195,7 +222,11 @@ def feedback_block(
         "is_self": fb.is_self_feedback,
     }
     if agent is not None:
-        out["endpoint_matched"] = endpoint_matches_services(fb.endpoint or "", agent.services or [])
+        matched = find_matched_service(fb.endpoint or "", agent.services or [])
+        if matched:
+            name = (matched.get("name") or "").strip()
+            ep = (matched.get("endpoint") or "").strip()
+            out["endpoint_matched"] = f"{name}:{ep}" if name else ep
     if include_offchain_when_empty_tags and not tag1 and not tag2 and fb.feedback_parsed:
         snippet = json.dumps(fb.feedback_parsed, ensure_ascii=False)
         if len(snippet) > 600:
@@ -237,7 +268,7 @@ def build_embedding_text(agent: AgentMeta, fb: FeedbackRecord) -> str:
         f"tag2={f['tag2']}",
         f"endpoint={f.get('endpoint','')}",
         f"agent={a['name']} — {a['summary']}",
-        f"services={a['services']}",
+        f"services={a.get('services', '')}",
         f"domains={a['domains']}",
     ]
     return " | ".join(p for p in parts if p.split("=", 1)[1])

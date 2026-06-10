@@ -9,8 +9,6 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 
-from sentence_transformers import SentenceTransformer
-
 from shared.ollama_client import OllamaClient
 from shared.prompts import system_prompt_v5
 
@@ -30,5 +28,39 @@ def get_ollama_client(model: str) -> OllamaClient:
 
 
 @lru_cache(maxsize=4)
-def get_embedder(model: str) -> SentenceTransformer:
+def get_embedder(model: str):
+    # Lazy import: /summarize and /classify do not need torch or sentence-transformers.
+    from sentence_transformers import SentenceTransformer
+
     return SentenceTransformer(model)
+
+
+@lru_cache(maxsize=1)
+def get_knn_classifier():
+    """Lazy singleton KNNCorpus — built on first call, cached for the process lifetime.
+
+    Building the corpus (sampling ~4K records from Mongo + encoding) takes
+    ~15-30 s on CPU. Subsequent calls return the cached instance immediately.
+    """
+    from shared.knn_classifier import KNNCorpus
+
+    encoder = get_embedder(DEFAULT_EMBED_MODEL)
+    corpus = KNNCorpus(encoder)
+    corpus.build()
+    return corpus
+
+
+@lru_cache(maxsize=1)
+def get_linear_classifier():
+    """Lazy singleton logistic-regression head.
+
+    Reuses the kNN corpus (identical vectors + labels) and fits a
+    LogisticRegression(class_weight='balanced') on top, so the comparison vs kNN
+    isolates the decision rule (learned boundary vs cosine majority vote).
+    """
+    from shared.linear_classifier import EmbeddingLinearClassifier
+
+    corpus = get_knn_classifier()
+    clf = EmbeddingLinearClassifier(corpus.embedder, corpus.vectors, corpus.labels)
+    clf.build()
+    return clf
