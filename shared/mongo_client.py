@@ -35,12 +35,27 @@ def get_db() -> Database:
     return get_client()[_env("MONGO_DATABASE_ANALYZED_AGENTS", "analyzed_agents")]
 
 
+@lru_cache(maxsize=1)
+def get_main_db() -> Database:
+    """Main backend DB. OASF schema tables (oasf_domains/oasf_skills) live here,
+    not in the analyzed_agents DB that holds feedback_history/agents."""
+    return get_client()[_env("MONGO_DATABASE", "erc8004")]
+
+
 def feedback_coll() -> Collection:
     return get_db()[_env("MONGO_COLLECTION_FEEDBACK_HISTORY", "feedback_history")]
 
 
 def agents_coll() -> Collection:
     return get_db()[_env("MONGO_COLLECTION_AGENTS", "agents")]
+
+
+def oasf_domains_coll() -> Collection:
+    return get_main_db()[_env("MONGO_COLLECTION_OASF_DOMAINS", "oasf_domains")]
+
+
+def oasf_skills_coll() -> Collection:
+    return get_main_db()[_env("MONGO_COLLECTION_OASF_SKILLS", "oasf_skills")]
 
 
 def fetch_agents_by_keys(keys: Iterable[tuple[int, str]]) -> dict[str, dict]:

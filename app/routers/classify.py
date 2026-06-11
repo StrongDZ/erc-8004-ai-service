@@ -15,9 +15,16 @@ from fastapi import APIRouter
 
 from shared.context_builder import build_user_message, endpoint_matches_services
 from shared.knn_classifier import KNNCorpus, feedback_embed_text
+from shared.oasf_enrich import agent_domain_text
 from shared.types import LLM_OUTPUT_CATEGORIES, AgentMeta, Category, FeedbackRecord
 
-from ..deps import DEFAULT_OLLAMA_MODEL, get_knn_classifier, get_linear_classifier, get_ollama_client
+from ..deps import (
+    DEFAULT_OLLAMA_MODEL,
+    get_enriched_linear_classifier,
+    get_knn_classifier,
+    get_linear_classifier,
+    get_ollama_client,
+)
 from ..schemas import ClassifyRequest, ClassifyResponse
 
 router = APIRouter()
@@ -112,6 +119,35 @@ def _linear_classify(req: ClassifyRequest) -> ClassifyResponse:
     )
 
 
+def _linear_enriched_classify(req: ClassifyRequest) -> ClassifyResponse:
+    """Route model='linear_enriched' to the late-fusion head.
+
+    feedback tower = tag1|tag2|endpoint|offchain; agent tower = agent description
+    + expanded OASF domain/skill descriptions (zero vector when none provided).
+    """
+    fb_text = feedback_embed_text(
+        req.tag1 or "",
+        req.tag2 or "",
+        req.endpoint or "",
+        req.offchain_content or "",
+    )
+    ag_text = agent_domain_text(
+        req.agent_description or "",
+        list(req.agent_oasf_domains),
+        list(req.agent_oasf_skills),
+    )
+    clf = get_enriched_linear_classifier()
+    result = clf.classify(fb_text, ag_text)
+    return ClassifyResponse(
+        category=result.category,
+        confidence=result.confidence,
+        reason=result.reason,
+        source="linear_enriched",
+        latency_ms=result.latency_ms,
+        model_ver="logreg-enriched-bge-base",
+    )
+
+
 def _ensemble_classify(req: ClassifyRequest) -> ClassifyResponse:
     """Ensemble: LLM junk-gate → kNN for non-junk.
 
@@ -163,6 +199,8 @@ def classify(req: ClassifyRequest) -> ClassifyResponse:
         return _knn_classify(req)
     if model_lower == "linear":
         return _linear_classify(req)
+    if model_lower == "linear_enriched":
+        return _linear_enriched_classify(req)
     if model_lower == "ensemble":
         return _ensemble_classify(req)
 

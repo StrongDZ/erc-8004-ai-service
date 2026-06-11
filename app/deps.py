@@ -64,3 +64,19 @@ def get_linear_classifier():
     clf = EmbeddingLinearClassifier(corpus.embedder, corpus.vectors, corpus.labels)
     clf.build()
     return clf
+
+
+@lru_cache(maxsize=1)
+def get_enriched_linear_classifier():
+    """Lazy singleton late-fusion head: [feedback_vec ‖ agent_vec].
+
+    Builds its own corpus (feedback + agent-domain text from description + OASF
+    schema) since the agent tower needs per-record agent context the kNN corpus
+    does not carry.
+    """
+    from shared.linear_classifier import EnrichedLinearClassifier
+
+    encoder = get_embedder(DEFAULT_EMBED_MODEL)
+    clf = EnrichedLinearClassifier(encoder)
+    clf.build()
+    return clf
