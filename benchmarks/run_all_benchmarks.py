@@ -39,7 +39,7 @@ from sklearn.svm import LinearSVC
 # Add parent dir to path so shared/ is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from shared.types import ALL_CATEGORIES, LLM_OUTPUT_CATEGORIES, RULE_TO_5CAT, SCORED_CATEGORIES
+from shared.types import ALL_CATEGORIES, LLM_OUTPUT_CATEGORIES, RULE_TO_CAT, SCORED_CATEGORIES
 
 warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -150,7 +150,7 @@ def load_rule_based_data_from_mongo() -> tuple[pd.DataFrame, pd.DataFrame, pd.Da
     df = stratified_sample(
         per_category=3000,
         seed=42,
-        categories=["junk", "service_feedback", "config_feedback", "app_specific"],
+        categories=["junk", "quality", "quantity"],
     )
 
     # De-duplicate by (tag1, tag2, label)
@@ -575,7 +575,7 @@ def generate_report(
         f"- **Training data source**: Rule-based classified feedback (unique tag combinations)",
         f"- **Training records**: {train_info['n_train']}",
         f"- **De-duplication**: Records de-duplicated by (tag1, tag2, label) to ensure uniqueness",
-        f"- **Categories (4 scored)**: junk, service_feedback, config_feedback, app_specific",
+        f"- **Categories ({len(SCORED_CATEGORIES)} scored)**: {', '.join(SCORED_CATEGORIES)}",
         "",
         "### Training Data Distribution",
         "",
@@ -713,8 +713,7 @@ def generate_report(
         "   inflating accuracy with repeated tag patterns.",
         "2. **Feature engineering**: Combined text feature from tag1, tag2, value_scale, endpoint,",
         "   and offchain content (feedbackParsed). Format: `tag1=X | tag2=Y | scale=Z | ...`",
-        "3. **Scoring**: Only 4 semantic categories scored (junk, service_feedback, config_feedback,",
-        "   app_specific). 'others' excluded from F1 as it's a fallback bucket, not a real class.",
+        f"3. **Scoring**: Only {len(SCORED_CATEGORIES)} semantic categories scored ({', '.join(SCORED_CATEGORIES)}). 'others' excluded from F1 as it's a fallback bucket, not a real class.",
         "4. **Class balancing**: All models use `class_weight='balanced'` where supported.",
         "5. **Embedding models** (kNN, EmbedLogReg): Use `all-MiniLM-L6-v2` sentence transformer.",
         "6. **TF-IDF models**: Use (1,2)-gram features with sublinear TF weighting.",
@@ -743,12 +742,24 @@ def main():
         train_df, val_df, test_rb_df = load_rule_based_data_from_parquet()
     else:
         train_df, val_df, test_rb_df = load_rule_based_data_from_mongo()
-        # Save for future runs
+        # Save for future runs (best-effort cache). feedback_parsed holds
+        # heterogeneous JSON (dicts and bare scalars) that pyarrow cannot type;
+        # stringify it in the saved copy only, leaving the in-memory frames intact.
         rb_dir = SPLITS_DIR / "rule_based"
         rb_dir.mkdir(parents=True, exist_ok=True)
-        train_df.to_parquet(rb_dir / "train.parquet", index=False)
-        val_df.to_parquet(rb_dir / "val.parquet", index=False)
-        test_rb_df.to_parquet(rb_dir / "test.parquet", index=False)
+        try:
+            def _save(df: pd.DataFrame, path):
+                out = df.copy()
+                if "feedback_parsed" in out.columns:
+                    out["feedback_parsed"] = out["feedback_parsed"].map(
+                        lambda v: json.dumps(v, default=str) if v is not None else None
+                    )
+                out.to_parquet(path, index=False)
+            _save(train_df, rb_dir / "train.parquet")
+            _save(val_df, rb_dir / "val.parquet")
+            _save(test_rb_df, rb_dir / "test.parquet")
+        except Exception as exc:  # caching is an optimization, never fatal
+            log.warning("Could not cache rule-based splits to parquet: %s", exc)
 
     # Combine train + val for final training (standard practice)
     full_train = pd.concat([train_df, val_df], ignore_index=True)

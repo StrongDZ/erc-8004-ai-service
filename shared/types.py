@@ -1,7 +1,12 @@
 """Dataclasses + category constants shared across notebooks.
 
-The LLM predicts 4 real categories. ``others`` is retained only as the
-rule-based fallback/source bucket for rows the rules could not cover.
+Two-axis taxonomy (matches the Go classifier + prompts SYSTEM_V6):
+  category ∈ {junk, quality, quantity}   (+ ``others`` as the rule fallback bucket)
+  feature  ∈ {infrastructure, agent_domain, both}   (analysis axis, not scored)
+
+The LLM predicts 3 real categories via a junk→quantity→quality cascade. ``others``
+is retained only as the rule-based fallback/source bucket for rows the rules could
+not cover. Only ``quality`` feeds the trust score.
 """
 from __future__ import annotations
 
@@ -10,38 +15,52 @@ from enum import Enum
 
 
 class Category(str, Enum):
-    JUNK = "junk"                          # spam + noise merged
-    SERVICE_FEEDBACK = "service_feedback"
-    CONFIG_FEEDBACK = "config_feedback"
-    APP_SPECIFIC = "app_specific"
-    OTHERS = "others"
+    JUNK = "junk"          # meaningless / spam / noise / placeholder
+    QUALITY = "quality"    # subjective sentiment + domain service/trust evaluations (scored)
+    QUANTITY = "quantity"  # tag names a measured metric (rate/score/speed/count) or unbounded
+    OTHERS = "others"      # rule fallback / escalation bucket — NOT a semantic class
+
+
+class Feature(str, Enum):
+    INFRASTRUCTURE = "infrastructure"  # generic signal applicable to ANY agent
+    AGENT_DOMAIN = "agent_domain"      # specific to this agent's business
+    BOTH = "both"                      # generic metric on a domain service
 
 
 LLM_OUTPUT_CATEGORIES: list[str] = [
     Category.JUNK.value,
-    Category.SERVICE_FEEDBACK.value,
-    Category.CONFIG_FEEDBACK.value,
-    Category.APP_SPECIFIC.value,
+    Category.QUALITY.value,
+    Category.QUANTITY.value,
 ]
 
 ALL_CATEGORIES: list[str] = LLM_OUTPUT_CATEGORIES + [Category.OTHERS.value]
 
-# Categories actually scored by F1 / precision / recall. This is identical to
-# the LLM output schema because `others` is not a semantic class.
+# Categories actually scored by F1 / precision / recall. Identical to the LLM
+# output schema because `others` is not a semantic class.
 SCORED_CATEGORIES: list[str] = LLM_OUTPUT_CATEGORIES
 
+FEATURES: list[str] = [Feature.INFRASTRUCTURE.value, Feature.AGENT_DOMAIN.value, Feature.BOTH.value]
 
-# Mapping from rule labels stored in Mongo to the data labels.
-# The runtime rule engine writes `junk` directly (spam/noise are merged before
-# persistence); the legacy spam/noise keys are kept for any pre-merge rows.
-# `others` stays as a source bucket so those rows can be handed to the LLM.
-RULE_TO_5CAT: dict[str, str] = {
+
+# Mapping from rule labels stored in Mongo to the data labels. The runtime rule
+# engine writes junk/quality/quantity/others directly; legacy 5-class keys are
+# folded in for any pre-migration rows (service→quality, config→quality,
+# app_specific→quantity, spam/noise→junk). `others` stays as an LLM source bucket.
+RULE_TO_CAT: dict[str, str] = {
     "junk": Category.JUNK.value,
-    "service_feedback": Category.SERVICE_FEEDBACK.value,
-    "config_feedback": Category.CONFIG_FEEDBACK.value,
-    "app_specific": Category.APP_SPECIFIC.value,
+    "quality": Category.QUALITY.value,
+    "quantity": Category.QUANTITY.value,
     "others": Category.OTHERS.value,
+    # legacy 5-class fallbacks
+    "service_feedback": Category.QUALITY.value,
+    "config_feedback": Category.QUALITY.value,
+    "app_specific": Category.QUANTITY.value,
+    "spam": Category.JUNK.value,
+    "noise": Category.JUNK.value,
 }
+
+# Backwards-compatible alias (old name used across notebooks/benchmarks).
+RULE_TO_5CAT: dict[str, str] = RULE_TO_CAT
 
 
 @dataclass
