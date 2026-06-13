@@ -60,15 +60,29 @@ class OllamaClient:
         user_message: str,
         *,
         allowed_categories: list[str] | None = None,
+        prompt_version: str = "v5",
     ) -> ClassificationResult:
         """Run classification. `allowed_categories` restricts the structured-output
         enum at the Ollama level — used by the endpoint hard-gate (drop `junk`
         when feedback endpoint matches an agent service).
         """
         t0 = time.monotonic()
-        enum = list(allowed_categories) if allowed_categories else list(LLM_OUTPUT_CATEGORIES)
+        default_cats = ["junk", "quantity", "quality"] if prompt_version == "v6" else list(LLM_OUTPUT_CATEGORIES)
+        enum = list(allowed_categories) if allowed_categories else default_cats
         if not enum:
-            enum = list(LLM_OUTPUT_CATEGORIES)
+            enum = default_cats
+
+        properties = {
+            "category": {"type": "string", "enum": enum},
+            "confidence": {"type": "number"},
+            "reason": {"type": "string"},
+        }
+        if prompt_version == "v6":
+            properties["feature"] = {
+                "type": ["string", "null"],
+                "enum": ["infrastructure", "agent_domain", "both", "null", "", None]
+            }
+
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": [
@@ -78,11 +92,7 @@ class OllamaClient:
             "stream": False,
             "format": {
                 "type": "object",
-                "properties": {
-                    "category": {"type": "string", "enum": enum},
-                    "confidence": {"type": "number"},
-                    "reason": {"type": "string"},
-                },
+                "properties": properties,
                 "required": ["category", "confidence"],
             },
             "options": {
@@ -99,7 +109,7 @@ class OllamaClient:
         except httpx.HTTPError as e:
             return _fallback(f"http_error: {e}", t0)
 
-        return _parse_output(raw, t0, allowed=enum)
+        return _parse_output(raw, t0, allowed=enum, prompt_version=prompt_version)
 
     def summarize(self, system: str, user: str, num_predict: int = 96) -> str:
         """Generic text generation (no enum schema) — used by agent summarisation."""
@@ -132,10 +142,11 @@ class OllamaClient:
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
-def _parse_output(raw: str, t0: float, *, allowed: list[str] | None = None) -> ClassificationResult:
+def _parse_output(raw: str, t0: float, *, allowed: list[str] | None = None, prompt_version: str = "v5") -> ClassificationResult:
     elapsed_ms = int((time.monotonic() - t0) * 1000)
     raw = (raw or "").strip()
-    valid = set(allowed) if allowed else set(LLM_OUTPUT_CATEGORIES)
+    default_cats = ["junk", "quantity", "quality"] if prompt_version == "v6" else list(LLM_OUTPUT_CATEGORIES)
+    valid = set(allowed) if allowed else set(default_cats)
     m = _JSON_RE.search(raw)
     if not m:
         return ClassificationResult(
@@ -156,6 +167,15 @@ def _parse_output(raw: str, t0: float, *, allowed: list[str] | None = None) -> C
             category="others", confidence=0.0, source="fallback",
             reason=f"invalid_category: {cat}", latency_ms=elapsed_ms, raw_output=raw,
         )
+
+    feat = obj.get("feature")
+    if feat is not None:
+        feat = str(feat).strip().lower()
+        if feat in ("null", ""):
+            feat = None
+        elif feat not in ("infrastructure", "agent_domain", "both"):
+            feat = None
+
     return ClassificationResult(
         category=cat,
         confidence=float(obj.get("confidence", 0.0)),
@@ -163,6 +183,7 @@ def _parse_output(raw: str, t0: float, *, allowed: list[str] | None = None) -> C
         source="llm",
         latency_ms=elapsed_ms,
         raw_output=raw,
+        feature=feat,
     )
 
 

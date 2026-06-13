@@ -73,10 +73,11 @@ def _allowed_categories(req: ClassifyRequest) -> list[str]:
     agent service endpoint, junk is removed — that feedback targets a real
     service the agent owns.
     """
+    categories = ["junk", "quantity", "quality"] if req.prompt_version == "v6" else list(LLM_OUTPUT_CATEGORIES)
     services = [svc.model_dump() for svc in req.agent_services]
     if endpoint_matches_services(req.endpoint or "", services):
-        return [c for c in LLM_OUTPUT_CATEGORIES if c != Category.JUNK.value]
-    return list(LLM_OUTPUT_CATEGORIES)
+        return [c for c in categories if c != "junk"]
+    return categories
 
 
 def _knn_classify(req: ClassifyRequest) -> ClassifyResponse:
@@ -159,12 +160,12 @@ def _ensemble_classify(req: ClassifyRequest) -> ClassifyResponse:
             (kNN excels at config_feedback, app_specific, service_feedback).
     """
     llm_model = DEFAULT_OLLAMA_MODEL
-    client = get_ollama_client(llm_model)
+    client = get_ollama_client(llm_model, req.prompt_version)
     user_msg = build_user_message(_to_agent_meta(req), _to_feedback_record(req))
     allowed = _allowed_categories(req)
-    llm_result = client.classify(user_msg, allowed_categories=allowed)
+    llm_result = client.classify(user_msg, allowed_categories=allowed, prompt_version=req.prompt_version)
 
-    if llm_result.category == Category.JUNK.value:
+    if llm_result.category == "junk":
         return ClassifyResponse(
             category=llm_result.category,
             confidence=llm_result.confidence,
@@ -172,6 +173,7 @@ def _ensemble_classify(req: ClassifyRequest) -> ClassifyResponse:
             source="ensemble_llm",
             latency_ms=llm_result.latency_ms,
             model_ver=f"ensemble({llm_model}+knn)",
+            feature=llm_result.feature,
         )
 
     text = feedback_embed_text(
@@ -205,10 +207,10 @@ def classify(req: ClassifyRequest) -> ClassifyResponse:
         return _ensemble_classify(req)
 
     model = req.model or DEFAULT_OLLAMA_MODEL
-    client = get_ollama_client(model)
+    client = get_ollama_client(model, req.prompt_version)
     user_msg = build_user_message(_to_agent_meta(req), _to_feedback_record(req))
     allowed = _allowed_categories(req)
-    result = client.classify(user_msg, allowed_categories=allowed)
+    result = client.classify(user_msg, allowed_categories=allowed, prompt_version=req.prompt_version)
     return ClassifyResponse(
         category=result.category,
         confidence=result.confidence,
@@ -216,4 +218,5 @@ def classify(req: ClassifyRequest) -> ClassifyResponse:
         source=result.source,
         latency_ms=result.latency_ms,
         model_ver=model,
+        feature=result.feature,
     )

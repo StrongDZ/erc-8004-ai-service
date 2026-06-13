@@ -46,6 +46,7 @@ class ClassifyResponse(BaseModel):
     source: str = "llm"
     latency_ms: int = 0
     model_ver: str = ""
+    feature: str | None = None
 
 
 class EmbedRequest(BaseModel):

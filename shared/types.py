@@ -84,3 +84,4 @@ class ClassificationResult:
     source: str = "llm"            # "llm" | "embedding" | "fallback"
     latency_ms: int = 0
     raw_output: str = ""           # for debugging
+    feature: str | None = None

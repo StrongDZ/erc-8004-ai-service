@@ -10,21 +10,23 @@ import os
 from functools import lru_cache
 
 from shared.ollama_client import OllamaClient
-from shared.prompts import system_prompt_v5
+from shared.prompts import system_prompt_v4, system_prompt_v5, system_prompt_v6
 
 
 DEFAULT_OLLAMA_MODEL = os.getenv("AI_SERVICE_DEFAULT_MODEL", "qwen2.5:3b")
 DEFAULT_EMBED_MODEL = os.getenv("AI_SERVICE_DEFAULT_EMBED_MODEL", "BAAI/bge-base-en-v1.5")
 
 
-@lru_cache(maxsize=8)
-def get_ollama_client(model: str) -> OllamaClient:
-    """One OllamaClient per model (Ollama keeps weights warm per model).
-
-    Default prompt is V5 (4-category spec + agent_domain + endpoint_matched + tier rule
-    + first-match ordering). Few-shot block included by default for smaller models.
-    """
-    return OllamaClient(model=model, system_prompt=system_prompt_v5(include_few_shot=True))
+@lru_cache(maxsize=16)
+def get_ollama_client(model: str, prompt_version: str = "v5") -> OllamaClient:
+    """One OllamaClient per model and prompt version (Ollama keeps weights warm per model)."""
+    if prompt_version == "v6":
+        system_prompt = system_prompt_v6(include_few_shot=True)
+    elif prompt_version in ("v4", "v4_xml"):
+        system_prompt = system_prompt_v4(include_few_shot=True)
+    else:
+        system_prompt = system_prompt_v5(include_few_shot=True)
+    return OllamaClient(model=model, system_prompt=system_prompt)
 
 
 @lru_cache(maxsize=4)

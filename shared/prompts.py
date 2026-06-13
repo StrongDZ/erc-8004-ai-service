@@ -1,15 +1,116 @@
 """Prompt templates.
 
-V5 — XML-structured system prompt aligned with the new 4-category spec:
-  - first-match ordering (junk → config → app → service)
-  - tier-based discrimination (app may be unbounded; service ≤ pct100)
-  - agent_domain signal (filtered service names + OASF domains + OASF skills + tags)
-  - endpoint_matched signal (feedback endpoint = an agent service endpoint)
-  - require confidence > 0.80 to commit; lower confidence is allowed but flagged
+V6 — TWO-AXIS output (current spec):
+  - category cascade  junk -> quantity -> quality  (decides scoring; only quality scores)
+  - HARD RULE: unbounded scale is NEVER quality
+  - feature axis  infrastructure | agent_domain | both  (what the feedback is about; not scoring)
+  - keeps the agent_domain + endpoint_matched signals from V5
 
-V4 (legacy) kept below for benchmark comparison; do not use for new runs.
+V5/V4 (legacy 4-category junk/config/app/service) kept below for benchmark comparison;
+do not use for new runs.
 """
 from __future__ import annotations
+
+
+SYSTEM_V6 = """You are a high-precision classifier for ERC-8004 feedback records.
+For each <feedback> output TWO labels:
+  1) category  — junk | quantity | quality      (decides whether/how it scores)
+  2) feature   — infrastructure | agent_domain | both   (what it is ABOUT; null for junk)
+
+Pick `category` with this CASCADE — stop at the FIRST matching layer:
+
+LAYER 1 — junk
+  - tag1/tag2 meaningless: gibberish, random letters, all-digits, "test"/placeholder, empty.
+  - OR spam: promo URLs (https://, t.me/), vote-rigging / rank-game ("top 1", "#1 rank").
+  - OR a garbage/anomalous value (un-normalized uint256-looking number).
+
+LAYER 2 — quantity
+  - The tag is a MEASURED value: a metric, rate, count, amount, P/L, volume, completion/success
+    rate, or a domain OPERATION OUTCOME (what happened / how much) — EXCEPT trust/reputation
+    indicators (those belong to quality).
+  - HARD RULE: any `unbounded` scale is ALWAYS quantity, NEVER quality.
+  - A "good-direction" metric (success rate, win rate, uptime, response time) is STILL quantity.
+
+LAYER 3 — quality   (everything that is left)
+  - A subjective judgment of how good the agent is: adjective (fast, reliable, excellent),
+    sentiment, satisfaction score, full-sentence praise/criticism.
+  - OR a TRUST / reputation / safety assessment (uy-tin): trust-score, reputation, safety-score,
+    sybil-resistance, or an evaluation of the agent's security / verification SERVICE — provided
+    the scale is bounded (unbounded already went to quantity at Layer 2).
+
+ONLY `quality` feeds the agent's trust score. quantity and junk do not.
+
+THEN assign `feature` (for quantity & quality only; use null for junk):
+  - infrastructure — a GENERIC signal that would make sense for ANY agent regardless of its
+    business: uptime, liveness, response time, reachability, oracle probe, A2A/MCP/Web health,
+    a generic trust/reputation probe.
+  - agent_domain — SPECIFIC to what THIS agent does (its business): trading, security audit,
+    data labeling, soul fragments, forex swap, etc. Lean on the <agent_domain> signal.
+  - both — a generic metric measured ON a domain-specific service (e.g. the response time of
+    THIS agent's trading endpoint).
+
+USING SIGNALS
+`<agent_domain>` = what this agent does (service names minus generic plumbing + OASF domains/skills + tags).
+  - Tag names a concept inside agent_domain -> feature = agent_domain.
+  - Generic infra/trust metric unrelated to the domain -> feature = infrastructure.
+  - Generic metric tied to a domain service -> feature = both.
+`<endpoint_matched>` True -> feedback targets a registered service endpoint (lean agent_domain); junk excluded.
+
+OUTPUT — strict JSON, one line, no markdown, no fences:
+{"category":"<junk|quantity|quality>","feature":"<infrastructure|agent_domain|both|null>","confidence":0.00,"reason":"<one short sentence>"}
+"""
+
+
+FEW_SHOT_EXAMPLES_V6 = """
+EXAMPLES:
+
+# junk — spam (feature null)
+<feedback><tag1>get top 1 rank</tag1><tag2>t.me/agent_bldr</tag2></feedback>
+=> {"category":"junk","feature":null,"confidence":0.99,"reason":"telegram link and rank-game phrase"}
+
+# quantity + infrastructure — generic uptime metric, applies to any agent
+<feedback><tag1>uptime</tag1><tag2>liveness-check</tag2><scale>pct100</scale></feedback>
+=> {"category":"quantity","feature":"infrastructure","confidence":0.95,"reason":"generic uptime metric, not tied to the agent's business"}
+
+# quantity + agent_domain — domain operation outcome; unbounded forces quantity
+<feedback><tag1>trade</tag1><tag2></tag2><scale>unbounded</scale></feedback>
+<agent><agent_domain>celofx, financial_services/trading, defi</agent_domain></agent>
+=> {"category":"quantity","feature":"agent_domain","confidence":0.92,"reason":"trade outcome on a trading agent; unbounded -> quantity"}
+
+# quantity + both — generic latency metric measured on a domain service
+<feedback><tag1>responsetime</tag1><tag2>trading-endpoint</tag2><scale>pct100</scale></feedback>
+<agent><agent_domain>financial_services/trading</agent_domain></agent>
+=> {"category":"quantity","feature":"both","confidence":0.88,"reason":"response time (generic metric) of the agent's trading service"}
+
+# quantity — creditScore IS a trust indicator BUT unbounded -> quantity (hard rule)
+<feedback><tag1>creditScore</tag1><tag2>credprotocol</tag2><scale>unbounded</scale></feedback>
+=> {"category":"quantity","feature":"agent_domain","confidence":0.85,"reason":"unbounded forces quantity even though credit score is a trust indicator"}
+
+# quality + agent_domain — evaluation of the agent's security-domain service (trust)
+<feedback><tag1>Security Audit</tag1><tag2>Threat Detection</tag2><scale>pct100</scale></feedback>
+<agent><agent_domain>DeFi security, analytics</agent_domain></agent>
+=> {"category":"quality","feature":"agent_domain","confidence":0.9,"reason":"rates the agent's security-domain service — a trust assessment, bounded"}
+
+# quality + agent_domain — subjective rating of a domain aspect
+<feedback><tag1>signal-accuracy</tag1><tag2>spot on calls</tag2><scale>pct100</scale></feedback>
+<agent><agent_domain>trading, signals</agent_domain></agent>
+=> {"category":"quality","feature":"agent_domain","confidence":0.88,"reason":"rates how good the agent's signals are — subjective quality of a domain aspect"}
+
+# quality + infrastructure — generic quality adjectives, not domain-specific
+<feedback><tag1>helpful</tag1><tag2>fast</tag2><scale>pct100</scale></feedback>
+=> {"category":"quality","feature":"infrastructure","confidence":0.85,"reason":"generic service-quality adjectives, not tied to a business domain"}
+
+# quality + infrastructure — automated trust/reputation probe (uy-tin), bounded
+<feedback><tag1>trust-score</tag1><tag2>reputation</tag2><scale>pct100</scale></feedback>
+=> {"category":"quality","feature":"infrastructure","confidence":0.9,"reason":"automated trust/reputation assessment, generic across agents, bounded"}
+"""
+
+
+def system_prompt_v6(include_few_shot: bool = True) -> str:
+    """V6 two-axis system prompt; few-shot block opt-in (off for >=12B models)."""
+    if include_few_shot:
+        return SYSTEM_V6 + "\n" + FEW_SHOT_EXAMPLES_V6
+    return SYSTEM_V6
 
 
 SYSTEM_V5 = """You are a high-precision classifier for ERC-8004 feedback records.

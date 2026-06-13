@@ -24,18 +24,19 @@ dependencies = [
     "scikit-learn>=1.4",
     "torch>=2.2",
 
-    # Eval + viz
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+notebook = [
     "matplotlib>=3.8",
     "seaborn>=0.13",
-    "tqdm>=4.66",
-
-    # Notebooks
     "jupyter>=1.1",
     "ipykernel>=6.29",
 ]
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "ruff>=0.4",
     "ipython>=8",
 ]
