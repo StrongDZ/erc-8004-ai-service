@@ -15,6 +15,11 @@ import json
 import sys
 from pathlib import Path
 
+# sentence_transformers (torch) must import before faiss: faiss-cpu and torch
+# bundle conflicting native OpenMP/BLAS runtimes on Apple Silicon, and loading
+# faiss first segfaults (SIGSEGV) as soon as the transformer model is constructed.
+from sentence_transformers import SentenceTransformer
+
 import faiss
 import numpy as np
 from tqdm import tqdm
@@ -37,11 +42,14 @@ def _agent_text(ag: dict) -> str:
     return f"{desc} {svcs}".strip()
 
 
-def build_index(batch_size: int = 512) -> None:
-    from sentence_transformers import SentenceTransformer
-
-    print(f"Loading {EMBED_MODEL}...")
-    model = SentenceTransformer(EMBED_MODEL)
+def build_index(batch_size: int = 64) -> None:
+    print(f"Loading {EMBED_MODEL} on CPU...")
+    # Force CPU: MPS (Apple GPU) shares unified memory with the OS on this
+    # machine (24GB total). Attention memory scales batch x seq^2, so a
+    # long-tailed agent description in a batch_size=512 batch under MPS's
+    # caching allocator exhausted RAM and swapped. CPU keeps memory flat.
+    model = SentenceTransformer(EMBED_MODEL, device="cpu")
+    model.max_seq_length = 256  # descriptions/services text never needs 512 tokens
 
     coll = agents_coll()
     # Only agents with description OR services
@@ -88,6 +96,6 @@ def build_index(batch_size: int = 512) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--batch-size", type=int, default=512)
+    parser.add_argument("--batch-size", type=int, default=64)
     args = parser.parse_args()
     build_index(args.batch_size)
