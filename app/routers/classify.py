@@ -2,7 +2,7 @@
 
 Hard endpoint gate: when the feedback endpoint matches one of the agent's
 service endpoints, the LLM output enum drops `junk` (the feedback clearly
-targets a real service, so it must fall in {config, app_specific, service_feedback}).
+targets a real service, so it must fall in {quantity, quality}).
 `others` is never in the LLM enum to start with.
 
 Special model value: model="knn" routes to the embedding kNN classifier instead
@@ -73,11 +73,30 @@ def _allowed_categories(req: ClassifyRequest) -> list[str]:
     agent service endpoint, junk is removed — that feedback targets a real
     service the agent owns.
     """
-    categories = ["junk", "quantity", "quality"] if req.prompt_version == "v6" else list(LLM_OUTPUT_CATEGORIES)
+    categories = (
+        ["junk", "quantity", "quality"]
+        if req.prompt_version in ("v6", "v7")
+        else list(LLM_OUTPUT_CATEGORIES)
+    )
     services = [svc.model_dump() for svc in req.agent_services]
     if endpoint_matches_services(req.endpoint or "", services):
         return [c for c in categories if c != "junk"]
     return categories
+
+
+def _run_llm_classify(req: ClassifyRequest, model: str, user_msg: str, allowed: list[str], *, category_only: bool = False):
+    """Dispatch v6 single-call vs v7 two-call classification."""
+    if req.prompt_version == "v7":
+        cat_client = get_ollama_client(model, "v7", "category")
+        feat_client = None if category_only else get_ollama_client(model, "v7", "feature")
+        return cat_client.classify_v7(
+            user_msg,
+            allowed_categories=allowed,
+            feature_client=feat_client,
+            category_only=category_only,
+        )
+    client = get_ollama_client(model, req.prompt_version)
+    return client.classify(user_msg, allowed_categories=allowed, prompt_version=req.prompt_version)
 
 
 def _knn_classify(req: ClassifyRequest) -> ClassifyResponse:
@@ -87,6 +106,8 @@ def _knn_classify(req: ClassifyRequest) -> ClassifyResponse:
         req.tag2 or "",
         req.endpoint or "",
         req.offchain_content or "",
+        value_norm=req.value_norm,
+        score_tier=req.scale,
     )
     corpus: KNNCorpus = get_knn_classifier()
     result = corpus.classify(text)
@@ -157,13 +178,12 @@ def _ensemble_classify(req: ClassifyRequest) -> ClassifyResponse:
             that kNN cannot reliably identify in embedding space.
     Step 2: if LLM predicts junk → return junk immediately (source=ensemble_llm).
     Step 3: otherwise hand off to kNN for the final category assignment
-            (kNN excels at config_feedback, app_specific, service_feedback).
+            (kNN excels at quality vs quantity boundaries in embedding space).
     """
     llm_model = DEFAULT_OLLAMA_MODEL
-    client = get_ollama_client(llm_model, req.prompt_version)
     user_msg = build_user_message(_to_agent_meta(req), _to_feedback_record(req))
     allowed = _allowed_categories(req)
-    llm_result = client.classify(user_msg, allowed_categories=allowed, prompt_version=req.prompt_version)
+    llm_result = _run_llm_classify(req, llm_model, user_msg, allowed, category_only=True)
 
     if llm_result.category == "junk":
         return ClassifyResponse(
@@ -207,10 +227,9 @@ def classify(req: ClassifyRequest) -> ClassifyResponse:
         return _ensemble_classify(req)
 
     model = req.model or DEFAULT_OLLAMA_MODEL
-    client = get_ollama_client(model, req.prompt_version)
     user_msg = build_user_message(_to_agent_meta(req), _to_feedback_record(req))
     allowed = _allowed_categories(req)
-    result = client.classify(user_msg, allowed_categories=allowed, prompt_version=req.prompt_version)
+    result = _run_llm_classify(req, model, user_msg, allowed)
     return ClassifyResponse(
         category=result.category,
         confidence=result.confidence,

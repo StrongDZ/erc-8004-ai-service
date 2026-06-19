@@ -1,10 +1,13 @@
 """Prompt templates.
 
-V6 — TWO-AXIS output (current spec):
-  - category cascade  junk -> quantity -> quality  (decides scoring; only quality scores)
-  - HARD RULE: unbounded scale is NEVER quality
-  - feature axis  infrastructure | agent_domain | both  (what the feedback is about; not scoring)
-  - keeps the agent_domain + endpoint_matched signals from V5
+V7 — split calls (current spec):
+  - Call 1: category cascade junk -> quantity -> quality
+  - Call 2: feature infrastructure | agent_domain | both (skipped for junk)
+  - unbounded scale is NEVER quality; it is NOT automatically quantity
+
+V6 — single-call two-axis (kept for benchmark comparison):
+  - category + feature in one response
+  - HARD RULE: unbounded scale is NEVER quality (legacy also mapped unbounded -> quantity)
 
 V5/V4 (legacy 4-category junk/config/app/service) kept below for benchmark comparison;
 do not use for new runs.
@@ -111,6 +114,174 @@ def system_prompt_v6(include_few_shot: bool = True) -> str:
     if include_few_shot:
         return SYSTEM_V6 + "\n" + FEW_SHOT_EXAMPLES_V6
     return SYSTEM_V6
+
+
+# ── V7 — split calls: category first, feature second ─────────────────────────
+
+SYSTEM_V7_CATEGORY = """You are a high-precision classifier for ERC-8004 feedback records.
+Output ONLY `category` — junk | quantity | quality (whether/how the feedback scores).
+
+Pick `category` with this CASCADE — stop at the FIRST matching layer:
+
+LAYER 1 — junk
+  - tag1/tag2 meaningless: gibberish, random letters, all-digits, UUID placeholders, "test"/placeholder.
+  - OR spam: promo URLs (https://, t.me/), vote-rigging / rank-game ("top 1", "#1 rank").
+  - OR a garbage/anomalous value (un-normalized uint256-looking number).
+
+LAYER 2 — quantity (must measure an OUTCOME — not a service evaluation)
+  - Tag names a COUNT, RATE, AMOUNT, P/L, volume, completion count, win/loss tally,
+    block height, timestamp delta, or a literal operation record (trade executed, swap done).
+  - The value answers HOW MUCH / HOW MANY / DID IT HAPPEN — not HOW GOOD.
+  - NOT quantity when tag names a SERVICE CAPABILITY the agent offers and the score rates
+    how well that service performed: audit, review, verification, rating, analysis,
+    labeling, intelligence, optimization (even on pct100/star5).
+
+SCALE RULE
+  - `unbounded` scale can NEVER be quality (no normalized satisfaction score).
+  - `unbounded` does NOT automatically mean quantity — still apply Layer 1 or Layer 2
+    by tag meaning (meaningless → junk; clear amount/outcome → quantity).
+
+LAYER 3 — quality (everything else on bounded scales, plus service evaluations)
+  - Subjective adjectives (fast, reliable, excellent, bad), sentiment, satisfaction score.
+  - Trust/reputation/safety assessment (trust-score, sybil-resistance, uy-tin).
+  - Evaluation of an agent SERVICE or DELIVERABLE on pct100/star5/star10/binary:
+    *-audit, *-review, *-rating, *-verification, *-analysis, *-intelligence, *-labeling,
+    agent_rating, content-intelligence, Security Audit, data-labeling, etc.
+
+ONLY `quality` feeds the agent's trust score. quantity and junk do not.
+
+DECISION TEST — your reason MUST state which question applied (min 8 words):
+  - "HOW GOOD is the agent/service?" → quality
+  - "HOW MUCH happened or raw outcome?" → quantity
+  - meaningless/spam → junk
+  - tag1 ends with -audit, -review, -rating, -verification, -analysis, -intelligence, -labeling
+    → lean quality unless tag explicitly counts events (vouch-count, order-count, win-rate).
+
+OUTPUT — strict JSON, one line, no markdown, no fences:
+{"category":"<junk|quantity|quality>","confidence":0.00,"reason":"<one sentence citing HOW GOOD or HOW MUCH or junk signal>"}
+"""
+
+
+FEW_SHOT_EXAMPLES_V7_CATEGORY = """
+EXAMPLES:
+
+# junk — spam
+<feedback><tag1>get top 1 rank</tag1><tag2>t.me/agent_bldr</tag2></feedback>
+=> {"category":"junk","confidence":0.99,"reason":"spam rank-game phrase — meaningless promotion, not HOW GOOD or HOW MUCH"}
+
+# junk — meaningless digits
+<feedback><tag1>6</tag1><tag2>666</tag2><scale>pct100</scale></feedback>
+=> {"category":"junk","confidence":0.98,"reason":"all-digit meaningless tags — junk signal, not a service rating"}
+
+# junk — UUID placeholder
+<feedback><tag1>02afee9d-f02c-4f46-a066-9d46c4d505a1</tag1><tag2></tag2><scale>pct100</scale></feedback>
+=> {"category":"junk","confidence":0.95,"reason":"UUID placeholder tag — junk signal, no semantic HOW GOOD or HOW MUCH"}
+
+# quantity — generic uptime metric
+<feedback><tag1>uptime</tag1><tag2>liveness-check</tag2><scale>pct100</scale></feedback>
+=> {"category":"quantity","confidence":0.95,"reason":"uptime completion rate — HOW MUCH availability, not HOW GOOD the service felt"}
+
+# quantity — domain operation outcome (unbounded = not quality, still quantity by tag)
+<feedback><tag1>trade</tag1><tag2></tag2><scale>unbounded</scale></feedback>
+<agent><agent_domain>celofx, financial_services/trading, defi</agent_domain></agent>
+=> {"category":"quantity","confidence":0.92,"reason":"trade outcome on trading agent — HOW MUCH happened; unbounded excludes quality only"}
+
+# quantity — vouch completion rate (contrast with service rating)
+<feedback><tag1>miner-vouch</tag1><tag2>botcoin</tag2><scale>pct100</scale></feedback>
+<agent><agent_domain>botcoin, mining</agent_domain></agent>
+=> {"category":"quantity","confidence":0.90,"reason":"vouch completion rate — HOW MUCH/miner outcome, not HOW GOOD the agent felt"}
+
+# quantity — binary win/loss outcome
+<feedback><tag1>claudelance</tag1><tag2>10</tag2><scale>binary</scale></feedback>
+=> {"category":"quantity","confidence":0.93,"reason":"binary win/loss outcome — HOW MUCH happened, not a satisfaction score"}
+
+# quality — domain SERVICE rating (NOT a raw metric)
+<feedback><tag1>content-intelligence</tag1><tag2>human-verification</tag2><scale>pct100</scale></feedback>
+=> {"category":"quality","confidence":0.90,"reason":"rates content-intelligence service — HOW GOOD the verification service performed"}
+
+# quality — agent_rating service evaluation
+<feedback><tag1>agent_rating</tag1><tag2>execution-market</tag2><scale>pct100</scale></feedback>
+=> {"category":"quality","confidence":0.88,"reason":"agent_rating scores service satisfaction — HOW GOOD, not a raw event count"}
+
+# quality — Security Audit trust assessment
+<feedback><tag1>Security Audit</tag1><tag2>MEV Protection</tag2><scale>pct100</scale></feedback>
+<agent><agent_domain>DeFi security, analytics</agent_domain></agent>
+=> {"category":"quality","confidence":0.90,"reason":"security service trust assessment — HOW GOOD the audit capability is"}
+
+# quality — generic adjectives
+<feedback><tag1>helpful</tag1><tag2>fast</tag2><scale>pct100</scale></feedback>
+=> {"category":"quality","confidence":0.85,"reason":"generic adjectives — HOW GOOD the service was, not HOW MUCH occurred"}
+
+# quality — signal accuracy evaluation (contrast: signal-accuracy rates quality not count)
+<feedback><tag1>signal-accuracy</tag1><tag2>spot on calls</tag2><scale>pct100</scale></feedback>
+<agent><agent_domain>trading, signals</agent_domain></agent>
+=> {"category":"quality","confidence":0.88,"reason":"rates signal accuracy — HOW GOOD the signals were, not a trade volume count"}
+"""
+
+
+SYSTEM_V7_FEATURE = """You are a feature-axis classifier for ERC-8004 feedback records.
+The `category` is already assigned in <assigned_category> — do NOT re-classify it.
+Output ONLY `feature` — what the feedback is ABOUT:
+
+  - infrastructure — a GENERIC signal for ANY agent: uptime, liveness, response time,
+    reachability, oracle probe, A2A/MCP/Web health, generic trust/reputation probe.
+  - agent_domain — SPECIFIC to what THIS agent does (trading, security audit, data labeling, …).
+    Lean on <agent_domain>.
+  - both — a generic metric measured ON a domain-specific service (e.g. response time of
+    THIS agent's trading endpoint).
+
+If <assigned_category> is junk, output feature=null (should not happen — host skips feature for junk).
+
+USING SIGNALS
+`<agent_domain>` = what this agent does (service names minus generic plumbing + OASF + tags).
+  - Tag inside agent_domain → lean agent_domain.
+  - Generic infra unrelated to domain → infrastructure.
+  - Generic metric on a domain service → both.
+`<endpoint_matched>` True → feedback targets a registered service endpoint (lean agent_domain).
+
+OUTPUT — strict JSON, one line, no markdown, no fences:
+{"feature":"<infrastructure|agent_domain|both|null>","confidence":0.00,"reason":"<one short sentence>"}
+"""
+
+
+FEW_SHOT_EXAMPLES_V7_FEATURE = """
+EXAMPLES:
+
+<assigned_category>quantity</assigned_category>
+<feedback><tag1>uptime</tag1><tag2>liveness-check</tag2><scale>pct100</scale></feedback>
+=> {"feature":"infrastructure","confidence":0.95,"reason":"generic uptime probe for any agent"}
+
+<assigned_category>quantity</assigned_category>
+<feedback><tag1>trade</tag1><tag2></tag2><scale>unbounded</scale></feedback>
+<agent><agent_domain>financial_services/trading, defi</agent_domain></agent>
+=> {"feature":"agent_domain","confidence":0.92,"reason":"trade outcome specific to trading agent domain"}
+
+<assigned_category>quantity</assigned_category>
+<feedback><tag1>responsetime</tag1><tag2>trading-endpoint</tag2><scale>pct100</scale></feedback>
+<agent><agent_domain>financial_services/trading</agent_domain></agent>
+=> {"feature":"both","confidence":0.88,"reason":"generic latency metric on a domain trading service"}
+
+<assigned_category>quality</assigned_category>
+<feedback><tag1>Security Audit</tag1><tag2>Threat Detection</tag2><scale>pct100</scale></feedback>
+<agent><agent_domain>DeFi security, analytics</agent_domain></agent>
+=> {"feature":"agent_domain","confidence":0.90,"reason":"security-domain service evaluation"}
+
+<assigned_category>quality</assigned_category>
+<feedback><tag1>helpful</tag1><tag2>fast</tag2><scale>pct100</scale></feedback>
+=> {"feature":"infrastructure","confidence":0.85,"reason":"generic service-quality adjectives"}
+"""
+
+
+def system_prompt_v7_category(include_few_shot: bool = True) -> str:
+    if include_few_shot:
+        return SYSTEM_V7_CATEGORY + "\n" + FEW_SHOT_EXAMPLES_V7_CATEGORY
+    return SYSTEM_V7_CATEGORY
+
+
+def system_prompt_v7_feature(include_few_shot: bool = True) -> str:
+    if include_few_shot:
+        return SYSTEM_V7_FEATURE + "\n" + FEW_SHOT_EXAMPLES_V7_FEATURE
+    return SYSTEM_V7_FEATURE
 
 
 SYSTEM_V5 = """You are a high-precision classifier for ERC-8004 feedback records.

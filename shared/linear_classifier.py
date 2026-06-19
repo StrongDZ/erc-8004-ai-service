@@ -111,7 +111,7 @@ class EnrichedLinearClassifier:
         df = stratified_sample(
             per_category=self.per_category,
             seed=self.seed,
-            categories=["junk", "service_feedback", "config_feedback", "app_specific"],
+            categories=list(LLM_OUTPUT_CATEGORIES),
         )
         df = df[df["rule_category"].isin(set(LLM_OUTPUT_CATEGORIES))].reset_index(drop=True)
 

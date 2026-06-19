@@ -119,3 +119,4 @@ Desktop.ini
 
 # --- Docker (if added later) ---
 .docker/
+.superpowers/

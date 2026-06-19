@@ -10,17 +10,31 @@ import os
 from functools import lru_cache
 
 from shared.ollama_client import OllamaClient
-from shared.prompts import system_prompt_v4, system_prompt_v5, system_prompt_v6
+from shared.prompts import (
+    system_prompt_v4,
+    system_prompt_v5,
+    system_prompt_v6,
+    system_prompt_v7_category,
+    system_prompt_v7_feature,
+)
 
 
 DEFAULT_OLLAMA_MODEL = os.getenv("AI_SERVICE_DEFAULT_MODEL", "qwen2.5:3b")
 DEFAULT_EMBED_MODEL = os.getenv("AI_SERVICE_DEFAULT_EMBED_MODEL", "BAAI/bge-base-en-v1.5")
 
 
-@lru_cache(maxsize=16)
-def get_ollama_client(model: str, prompt_version: str = "v5") -> OllamaClient:
-    """One OllamaClient per model and prompt version (Ollama keeps weights warm per model)."""
-    if prompt_version == "v6":
+@lru_cache(maxsize=32)
+def get_ollama_client(model: str, prompt_version: str = "v5", role: str = "default") -> OllamaClient:
+    """One OllamaClient per (model, prompt_version, role).
+
+    v7 uses role='category' | 'feature' for the two-call split.
+    """
+    if prompt_version == "v7":
+        if role == "feature":
+            system_prompt = system_prompt_v7_feature(include_few_shot=True)
+        else:
+            system_prompt = system_prompt_v7_category(include_few_shot=True)
+    elif prompt_version == "v6":
         system_prompt = system_prompt_v6(include_few_shot=True)
     elif prompt_version in ("v4", "v4_xml"):
         system_prompt = system_prompt_v4(include_few_shot=True)

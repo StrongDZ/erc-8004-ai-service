@@ -205,7 +205,7 @@ def feedback_block(
     matched service's "name:endpoint" string when the feedback endpoint matches
     one of the agent's registered services, absent otherwise. Downstream, a
     match means the feedback targets a real service the agent owns, so
-    classification is restricted to {config_feedback, app_specific, service_feedback}.
+    classification is restricted to {quality, quantity} (junk removed).
 
     feedbackParsed is included ONLY when both tag1 and tag2 are empty (the user's
     rule: "production classifies on tag1/tag2 if they exist; offchain is the

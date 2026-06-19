@@ -15,7 +15,7 @@ from pathlib import Path
 import pandas as pd
 
 from .mongo_client import feedback_coll
-from .types import LLM_OUTPUT_CATEGORIES, RULE_TO_5CAT
+from .types import LLM_OUTPUT_CATEGORIES, MONGO_CATEGORY_ALIASES, RULE_TO_5CAT
 
 
 def _record_to_row(doc: dict) -> dict:
@@ -48,16 +48,15 @@ def stratified_sample(
     or in a later augmentation pass.
     """
     if categories is None:
-        # Note we sample from RULE labels (6-cat in storage) then remap; this
-        # lets us pull noise + spam separately before merging into junk.
-        categories = ["spam", "noise", "service_feedback", "config_feedback", "app_specific", "others"]
+        categories = list(MONGO_CATEGORY_ALIASES.keys())
 
     rng = random.Random(seed)
     frames = []
     coll = feedback_coll()
     for cat in categories:
+        aliases = MONGO_CATEGORY_ALIASES.get(cat, [cat])
         cursor = coll.aggregate([
-            {"$match": {"classification.rule.category": cat}},
+            {"$match": {"classification.rule.category": {"$in": aliases}}},
             {"$sample": {"size": per_category}},
         ])
         rows = [_record_to_row(d) for d in cursor]
@@ -101,7 +100,11 @@ def load_hand_labelled_csv(gold_csv: Path) -> pd.DataFrame:
         "value_raw": "value",
         "scale": "value_scale",
         "gold_category": "gold_label",
+        "category": "gold_label_from_category",
     })
+    if "gold_label" not in raw.columns or raw["gold_label"].astype(str).str.strip().eq("").all():
+        if "gold_label_from_category" in raw.columns:
+            raw["gold_label"] = raw["gold_label_from_category"]
     raw["label"] = (
         raw["gold_label"]
         .astype(str)

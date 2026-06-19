@@ -17,7 +17,7 @@ from enum import Enum
 class Category(str, Enum):
     JUNK = "junk"          # meaningless / spam / noise / placeholder
     QUALITY = "quality"    # subjective sentiment + domain service/trust evaluations (scored)
-    QUANTITY = "quantity"  # tag names a measured metric (rate/score/speed/count) or unbounded
+    QUANTITY = "quantity"  # measured outcome/metric; unbounded excludes quality but not auto-quantity
     OTHERS = "others"      # rule fallback / escalation bucket — NOT a semantic class
 
 
@@ -61,6 +61,16 @@ RULE_TO_CAT: dict[str, str] = {
 
 # Backwards-compatible alias (old name used across notebooks/benchmarks).
 RULE_TO_5CAT: dict[str, str] = RULE_TO_CAT
+
+# Mongo `classification.rule.category` values to query per canonical label.
+# Runtime writes junk/quality/quantity/others; legacy rows may still use the
+# 5-class keys — always query with $in aliases so corpus sampling stays balanced.
+MONGO_CATEGORY_ALIASES: dict[str, list[str]] = {
+    Category.JUNK.value: ["junk", "spam", "noise"],
+    Category.QUALITY.value: ["quality", "service_feedback", "config_feedback"],
+    Category.QUANTITY.value: ["quantity", "app_specific"],
+    Category.OTHERS.value: ["others"],
+}
 
 
 @dataclass

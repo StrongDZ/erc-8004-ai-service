@@ -170,8 +170,15 @@ def load_rule_based_data_from_mongo() -> tuple[pd.DataFrame, pd.DataFrame, pd.Da
     return train, val, test
 
 
-def load_hand_labelled_gold() -> pd.DataFrame:
+def load_hand_labelled_gold(gold_csv: Path | None = None) -> pd.DataFrame:
     """Load the hand-labelled gold benchmark set."""
+    if gold_csv is not None and gold_csv.exists():
+        log.info("Loading gold from explicit path: %s", gold_csv)
+        from shared.data_loader import load_hand_labelled_csv
+        df = load_hand_labelled_csv(gold_csv)
+        log.info("Gold set: %d records, labels:\n%s", len(df), df["label"].value_counts().to_string())
+        return df
+
     gold_path = SPLITS_DIR / "hand_labelled" / "test.parquet"
     if gold_path.exists():
         log.info("Loading hand-labelled gold from parquet: %s", gold_path)
@@ -181,6 +188,7 @@ def load_hand_labelled_gold() -> pd.DataFrame:
 
     # Fallback to CSV
     csv_candidates = [
+        ROOT.parent / "erc-8004-benchmarking-be" / "scripts" / "labelled" / "gold_final.csv",
         ROOT / "scripts" / "labelled" / "others_gold_v1.csv",
         ROOT / "data" / "others_gold_v1.csv",
     ]
@@ -197,6 +205,58 @@ def load_hand_labelled_gold() -> pd.DataFrame:
 def prepare_features(df: pd.DataFrame) -> pd.Series:
     """Build combined text feature column."""
     return df.apply(build_feature_text, axis=1)
+
+
+def build_feature_text_enriched(row: pd.Series) -> str:
+    """Enriched text feature: adds value_norm, value_decimals, score_tier (new tier logic).
+
+    Augments the base feature text with structured value signals that the base
+    function omits: the normalized feedback value, how many decimals it was stored
+    with, and the scale tier recomputed with the v2 rule (only exact 0/1 → binary;
+    (0,1) exclusive → unbounded).  These are strong discriminators for the
+    quantity↔quality boundary.
+    """
+    from shared.knn_classifier import _row_value_fields
+
+    parts = []
+    tag1 = str(row.get("tag1", "") or "").strip()
+    tag2 = str(row.get("tag2", "") or "").strip()
+    endpoint = str(row.get("endpoint", "") or "").strip()
+
+    if tag1:
+        parts.append(f"tag1={tag1}")
+    if tag2:
+        parts.append(f"tag2={tag2}")
+
+    val_norm, val_dec, score_tier = _row_value_fields(row.to_dict())
+    # Prefer re-computed tier (new logic); fall back to stored value_scale.
+    tier = score_tier or str(row.get("value_scale", "") or "").strip()
+    if tier:
+        parts.append(f"scale={tier}")
+    if val_dec:
+        parts.append(f"decimals={val_dec}")
+    if val_norm != 0.0:
+        parts.append(f"value={val_norm:.2f}")
+
+    if endpoint:
+        import urllib.parse
+        try:
+            host = urllib.parse.urlparse(endpoint).hostname or endpoint
+            parts.append(f"endpoint={host}")
+        except Exception:
+            parts.append(f"endpoint={endpoint}")
+
+    fp = row.get("feedback_parsed")
+    offchain = _offchain_to_text(fp)
+    if offchain:
+        parts.append(f"offchain={offchain[:300]}")
+
+    return " | ".join(parts) if parts else "<empty>"
+
+
+def prepare_features_enriched(df: pd.DataFrame) -> pd.Series:
+    """Build enriched text feature column (value_norm + value_decimals + score_tier)."""
+    return df.apply(build_feature_text_enriched, axis=1)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -468,6 +528,16 @@ class EmbeddingLogReg(BaseModel):
         return self.clf.predict(vectors).tolist()
 
 
+# Enriched variants — same classifier, trained on enriched text features
+# (value_norm + value_decimals + score_tier added to the input text).
+class LogisticRegressionTFIDF_Enriched(LogisticRegressionTFIDF):
+    name = "logistic_regression_tfidf_enriched"
+
+
+class EmbeddingLogReg_Enriched(EmbeddingLogReg):
+    name = "embedding_logreg_enriched"
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  BENCHMARK RUNNER
 # ══════════════════════════════════════════════════════════════════════════════
@@ -732,6 +802,16 @@ def generate_report(
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Run feedback classification benchmarks")
+    parser.add_argument(
+        "--gold-csv",
+        type=Path,
+        default=None,
+        help="Path to hand-labelled gold CSV (default: gold_final.csv if present)",
+    )
+    args = parser.parse_args()
+
     log.info("=" * 70)
     log.info("FEEDBACK CLASSIFICATION BENCHMARK")
     log.info("=" * 70)
@@ -765,7 +845,7 @@ def main():
     full_train = pd.concat([train_df, val_df], ignore_index=True)
 
     # Load hand-labelled gold
-    gold_df = load_hand_labelled_gold()
+    gold_df = load_hand_labelled_gold(args.gold_csv)
 
     # ── 2. Feature engineering ────────────────────────────────────────────
     log.info("Building text features...")
@@ -805,12 +885,35 @@ def main():
         EmbeddingLogReg(),
     ]
 
+    # ── 3b. Enriched features (value_norm + value_decimals + score_tier) ─────
+    log.info("Building enriched text features (+ value_norm, decimals, score_tier)...")
+    X_train_enriched = prepare_features_enriched(full_train)
+    test_sets_enriched: dict[str, tuple[pd.Series, pd.Series]] = {
+        "rule_based_test": (prepare_features_enriched(test_rb_df), y_test_rb),
+    }
+    if len(gold_df) > 0:
+        test_sets_enriched["hand_labelled_gold"] = (
+            prepare_features_enriched(gold_df), y_test_gold
+        )
+
     # ── 4. Run benchmarks ─────────────────────────────────────────────────
     all_results: dict[str, dict[str, dict]] = {}
 
     for model in models:
         try:
             results = run_benchmark(model, X_train_text, y_train, test_sets)
+            all_results[model.name] = results
+        except Exception as e:
+            log.error("FAILED: %s — %s", model.name, e, exc_info=True)
+            all_results[model.name] = {}
+
+    enriched_models: list[BaseModel] = [
+        LogisticRegressionTFIDF_Enriched(),
+        EmbeddingLogReg_Enriched(),
+    ]
+    for model in enriched_models:
+        try:
+            results = run_benchmark(model, X_train_enriched, y_train, test_sets_enriched)
             all_results[model.name] = results
         except Exception as e:
             log.error("FAILED: %s — %s", model.name, e, exc_info=True)
