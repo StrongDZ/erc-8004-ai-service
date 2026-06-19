@@ -194,6 +194,7 @@ def run_ablation(gold: pd.DataFrame, run: int, skip_llm: bool) -> list[dict]:
         use_llm = run_id == 5 and not skip_llm
 
         preds = []; sources = []; llm_count = 0
+        audit_rows = []
         llm_t0 = time.time()
 
         for _, row in gold.iterrows():
@@ -202,11 +203,23 @@ def run_ablation(gold: pd.DataFrame, run: int, skip_llm: bool) -> list[dict]:
             scale = str(row.get("value_scale","") or "").strip()
             decimals = int(row.get("value_decimals", 0) or 0)
             agent_key = str(row.get("agent_key","") or "")
+            true_label = row.get("label")
+            has_meta = bool(row.get("has_agent_metadata"))
+
+            def _record(pred: str, source: str, reason: str = "") -> None:
+                preds.append(pred); sources.append(source)
+                audit_rows.append({
+                    "id": row.get("id"), "tag1": tag1, "tag2": tag2,
+                    "value_scale": scale, "value_decimals": decimals,
+                    "agent_key": agent_key, "has_agent_metadata": has_meta,
+                    "true_label": true_label, "pred": pred, "stage": source,
+                    "reason": reason, "correct": pred == true_label,
+                })
 
             # Stage 1: rule
             cat = rule_classify(row)
             if cat:
-                preds.append(cat); sources.append("rule"); continue
+                _record(cat, "rule"); continue
 
             # Stage 2: per-tag SVM voting (single source of truth: per_tag_svm.vote_per_tag)
             p1 = predict_quality_prob(per_tag_pipe, tag1, scale) if tag1 else 0.5
@@ -216,26 +229,26 @@ def run_ablation(gold: pd.DataFrame, run: int, skip_llm: bool) -> list[dict]:
             stage2_result = vote_per_tag(p1, p2, t2_empty=t2_empty, thresh=SVM_VOTE_THRESH)
 
             if stage2_result == "quality":
-                preds.append("quality"); sources.append("per_tag_svm"); continue
+                _record("quality", "per_tag_svm", f"p1={p1:.2f},p2={p2:.2f}"); continue
             elif stage2_result == "non_quality":
                 # SVM says non-quality but doesn't know if quantity or junk → Stage 3 resolves it
                 if not use_faiss:
-                    preds.append("quantity"); sources.append("per_tag_svm_non_quality"); continue
+                    _record("quantity", "per_tag_svm_non_quality", f"p1={p1:.2f},p2={p2:.2f}"); continue
 
             # Stage 3: FAISS domain check
             if use_faiss:
                 label3, reason = dc.classify(tag1, tag2, scale, decimals, agent_key)
                 if label3 is not None:
-                    preds.append(label3); sources.append(f"faiss:{reason[:20]}"); continue
+                    _record(label3, "faiss", reason); continue
 
             # Stage 4: LLM
             if use_llm:
                 llm_cat = llm_classify(row, LLM_MODEL)
-                preds.append(llm_cat); sources.append("llm"); llm_count += 1
+                _record(llm_cat, "llm"); llm_count += 1
             else:
                 # No LLM → use ML best guess
-                preds.append("quality" if p1 >= 0.50 else "quantity")
-                sources.append("ml_default")
+                guess = "quality" if p1 >= 0.50 else "quantity"
+                _record(guess, "ml_default", f"p1={p1:.2f}")
 
         run_name = f"Run {run_id}: Rule + Per-Tag SVM" + (" + FAISS" if use_faiss else "") + (" + LLM" if use_llm else "")
         res = _print_results(run_name, y_true, preds, sources)
@@ -245,6 +258,11 @@ def run_ablation(gold: pd.DataFrame, run: int, skip_llm: bool) -> list[dict]:
         res["f1_rich"] = _sub_group_f1(y_true, preds, rich_mask, "Gold-Rich")
         res["f1_poor"] = _sub_group_f1(y_true, preds, poor_mask, "Gold-Poor")
         results.append(res)
+
+        audit_path = OUT_DIR / f"audit_run{run_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        pd.DataFrame(audit_rows).to_csv(audit_path, index=False)
+        res["audit_csv"] = str(audit_path)
+        print(f"  Per-record audit saved to {audit_path}")
 
     return results
 
