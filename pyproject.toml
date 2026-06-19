@@ -22,6 +22,8 @@ dependencies = [
     "torch>=2.2",
     "tqdm>=4.66",
     "spacy>=3.8.14",
+    # Vector similarity search
+    "faiss-cpu>=1.8",
 ]
 
 [project.optional-dependencies]
