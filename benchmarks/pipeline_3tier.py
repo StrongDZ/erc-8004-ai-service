@@ -47,7 +47,7 @@ _UUID = re.compile(
 _EMOJI_ONLY = re.compile(r"^[\U0001F000-\U0001FFFF☀-⟿\s]+$")
 _ALL_DIGITS = re.compile(r"^[0-9]+$")
 
-_NOISE_T1 = {"test", "asd", "custom", "settled", "claudelance", "vibez"}
+_NOISE_T1 = {"test", "asd", "custom", "settled", "vibez"}
 
 _QUANTITY_T1 = {
     "reachable", "liveness", "successrate", "success-rate",

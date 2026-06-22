@@ -22,7 +22,8 @@ import httpx
 from .types import LLM_OUTPUT_CATEGORIES, ClassificationResult
 
 _DEFAULT_TIMEOUT = 120.0
-_V7_TAXONOMY = frozenset({"v6", "v7"})
+# Prompts using the 3-category taxonomy: junk | quantity | quality (no legacy 4-cat).
+_V7_TAXONOMY = frozenset({"v6", "v7", "v8"})
 
 
 def _uses_v7_taxonomy(prompt_version: str) -> bool:

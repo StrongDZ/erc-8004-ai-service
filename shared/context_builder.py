@@ -216,10 +216,9 @@ def feedback_block(
     out: dict = {
         "tag1": tag1,
         "tag2": tag2,
-        "endpoint": fb.endpoint or "",
+        "comment": fb.feedback_parsed.get("comment", "") if fb.feedback_parsed else "",
         "scale": fb.value_scale or "",
-        "value": fb.value,
-        "is_self": fb.is_self_feedback,
+        "value": (float(fb.value) if fb.value else 0.0) / 10 ** fb.value_decimals,
     }
     if agent is not None:
         matched = find_matched_service(fb.endpoint or "", agent.services or [])

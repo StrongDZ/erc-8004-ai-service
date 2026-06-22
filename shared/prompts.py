@@ -11,6 +11,10 @@ V6 — single-call two-axis (kept for benchmark comparison):
 
 V5/V4 (legacy 4-category junk/config/app/service) kept below for benchmark comparison;
 do not use for new runs.
+
+Note: records where BOTH tag1 and tag2 are empty are intercepted by the rule-based
+pre-filter (classify.py: _empty_tag_pre_filter) BEFORE the LLM is called.
+Unbounded -> quantity, any bounded scale -> quality. The LLM never sees them.
 """
 from __future__ import annotations
 
@@ -276,6 +280,183 @@ def system_prompt_v7_category(include_few_shot: bool = True) -> str:
     if include_few_shot:
         return SYSTEM_V7_CATEGORY + "\n" + FEW_SHOT_EXAMPLES_V7_CATEGORY
     return SYSTEM_V7_CATEGORY
+
+
+# ── V8 shared building blocks ─────────────────────────────────────────────────
+# Layer 1 and Layer 2 are identical for both bounded and unbounded prompts.
+# system_prompt_v8_category() composes the final prompt from these blocks,
+# appending or omitting the quality layer based on scale.
+
+_V8_LAYER_JUNK = """\
+LAYER 1 — junk  (STRICT — default to the next layer when uncertain)
+  A tag is junk ONLY if it clearly falls into one of these categories:
+  • Pure random characters: no recognizable words in any language or domain
+    (e.g. "xkqzw", bare UUID, bare digit string "666" with no measurement label).
+  • Emoji-only or emoji-dominated: tag content is entirely or primarily decorative emojis
+    with no accompanying agent-relevant text (rating stars used as the scale field are
+    handled by the scale system, not the tag — emojis AS the tag itself are junk).
+  • Spam: promo URLs (https://, t.me/), vote-rigging phrases ("top 1 rank", "#1 agent").
+  • Real-world proper names with NO plausible connection to AI/agent functionality:
+    human personal names, religious figures, fictional TV/film characters, celebrity names.
+    Test whether the name could describe an agent capability, service, or domain action —
+    if it cannot, it is junk.
+  • Developer test/placeholder strings: tags containing patterns that signal a non-production
+    entry such as _test, -test, test_, debug, placeholder, sample, or a bare small integer
+    ("10", "0") with no units when paired with no meaningful second tag.
+  NEVER junk: protocol/technology names, crypto project names, domain actions, community names,
+  agent tool names, slang used as genuine feedback, informal words that still describe agent
+  behaviour, or any tag where you can construct a plausible agent evaluation meaning.
+  WHEN UNCERTAIN between junk and the next layer → always choose the next layer."""
+
+_V8_LAYER_QUANTITY = """\
+LAYER 2 — quantity  (measured STATISTIC / METRIC / INDEX only)
+  Tag names a number you would put on a dashboard:
+  rate, ratio, count, amount, P/L, volume, speed, latency, uptime, freshness,
+  coefficient, risk-score, credit-score, win-rate, success-rate, completion-rate."""
+
+# Carve-outs only relevant when Layer 3 exists (bounded prompt only).
+_V8_QUANTITY_CARVEOUTS = """\
+  • NOT quantity: domain action/operation (swap, trade, stake, mint, match-played) → quality.
+  • NOT quantity: trust/reputation indicators (trust-score, reputation) → quality."""
+
+_V8_LAYER_QUALITY = """\
+LAYER 3 — quality  (DEFAULT for all remaining bounded records)
+  Rates HOW GOOD the agent/service is:
+  adjectives, sentiment, satisfaction, trust/reputation, service evaluation,
+  domain action performed on bounded scale."""
+
+# ── few-shot examples split by category ───────────────────────────────────────
+# Unbounded prompt reuses _V8_EXAMPLES_JUNK_QUANTITY without duplication.
+# Bounded prompt appends _V8_EXAMPLES_QUALITY on top.
+
+_V8_EXAMPLES_JUNK_QUANTITY = """\
+EXAMPLES:
+
+# junk — spam rank-game
+<feedback><tag1>boost my ranking</tag1><tag2>t.me/cryptoboost_promo</tag2><scale>binary</scale></feedback>
+=> {"category":"junk","confidence":0.99,"reason":"Layer 1: spam rank-game with promo link, no semantic value"}
+
+# junk — bare hex string (no label/unit)
+<feedback><tag1>9f3a7e21</tag1><tag2></tag2><scale>binary</scale></feedback>
+=> {"category":"junk","confidence":0.92,"reason":"Layer 1: bare hex string has no semantic meaning"}
+
+# quantity — dashboard metric
+<feedback><tag1>throughput-rate</tag1><tag2>batch-processing</tag2><scale>pct100</scale></feedback>
+=> {"category":"quantity","confidence":0.95,"reason":"Layer 2: throughput-rate is a measurable statistic (HOW MUCH)"}
+
+# quantity — latency percentile
+<feedback><tag1>latency-ms</tag1><tag2>p95</tag2><scale>pct100</scale></feedback>
+=> {"category":"quantity","confidence":0.95,"reason":"Layer 2: latency percentile is a performance metric, not a quality rating"}"""
+
+_V8_EXAMPLES_QUALITY = """\
+
+# quality — domain action on bounded scale
+<feedback><tag1>execute_order</tag1><tag2></tag2><scale>pct100</scale></feedback>
+<agent><agent_domain>defi, order execution</agent_domain></agent>
+=> {"category":"quality","confidence":0.85,"reason":"Layer 3: execute_order is a domain operation on bounded scale"}
+
+# quality — service rating
+<feedback><tag1>service_review</tag1><tag2>merchant-desk</tag2><scale>pct100</scale></feedback>
+=> {"category":"quality","confidence":0.88,"reason":"Layer 3: service_review scores HOW GOOD the service was"}
+
+# quality — adjectives
+<feedback><tag1>friendly</tag1><tag2>quick</tag2><scale>pct100</scale></feedback>
+=> {"category":"quality","confidence":0.85,"reason":"Layer 3: adjectives rate quality, not a dashboard metric"}"""
+
+
+_V8_EXAMPLES_UNBOUNDED_QUANTITY = """
+
+# quantity — business/financial tags on unbounded (informal ≠ meaningless)
+<feedback><tag1>treasury-inflow</tag1><tag2>runway</tag2><scale>unbounded</scale></feedback>
+=> {"category":"quantity","confidence":0.82,"reason":"Layer 2: recognisable business words; unbounded scale → quantity, not junk"}
+
+# quantity — community/protocol name on unbounded (unfamiliar ≠ junk)
+<feedback><tag1>zynqdao</tag1><tag2>bullish</tag2><scale>unbounded</scale></feedback>
+=> {"category":"quantity","confidence":0.78,"reason":"Layer 2: 'zynqdao' is an unfamiliar but recognisable token name; unbounded → quantity"}
+
+# quantity — template-like tag on unbounded (placeholder-looking ≠ junk when unbounded)
+<feedback><tag1>onboarding</tag1><tag2>flow-v2</tag2><scale>unbounded</scale></feedback>
+=> {"category":"quantity","confidence":0.78,"reason":"Layer 2: recognisable common words; unbounded scale → quantity regardless of how generic the tag looks"}
+
+# quantity — casual/slang tag on unbounded (informal ≠ junk)
+<feedback><tag2>lit fr fr</tag2><scale>unbounded</scale></feedback>
+=> {"category":"quantity","confidence":0.75,"reason":"Layer 2: informal word but contains meaning; unbounded → quantity"}"""
+
+
+_V8_EXAMPLES_BOUNDED_NOT_JUNK = """
+
+# quality — casual/slang tags on bounded (slang ≠ junk)
+<feedback><tag1>solid build</tag1><scale>binary</scale></feedback>
+=> {"category":"quality","confidence":0.72,"reason":"Layer 3: informal praise expression on bounded scale; slang is NOT junk"}
+
+# quality — informal expression on bounded (casual ≠ junk)
+<feedback><tag1>yikes</tag1><scale>binary</scale></feedback>
+=> {"category":"quality","confidence":0.70,"reason":"Layer 3: recognisable expression, not spam/random chars; uncertain → quality"}
+
+# quality — misspelling/casual on bounded (misspelling ≠ junk)
+<feedback><tag1>latency</tag1><tag2>prett gud</tag2><scale>pct100</scale></feedback>
+=> {"category":"quality","confidence":0.72,"reason":"Layer 3: 'pretty good' misspelling — recognisable phrase; uncertain → quality"}
+
+# quality — protocol name on bounded (unknown protocol ≠ junk)
+<feedback><tag1>kasiwallet</tag1><tag2>polygon</tag2><scale>pct100</scale></feedback>
+=> {"category":"quality","confidence":0.73,"reason":"Layer 3: unfamiliar token names but recognisable words; unknown protocol ≠ junk → quality"}"""
+
+
+def system_prompt_v8_category(include_few_shot: bool = True, scale: str = "") -> str:
+    """Build the V8 category system prompt from shared building blocks.
+
+    Bounded (default): Layer 1 + Layer 2 (with carve-outs) + Layer 3 quality.
+    Unbounded:         Layer 1 + Layer 2 (no carve-outs, no Layer 3).
+
+    Examples are split: junk/quantity examples are shared; quality examples
+    are appended only for bounded prompts.
+    """
+    is_unbounded = (scale or "").strip().lower() == "unbounded"
+
+    if is_unbounded:
+        header = (
+            "Classify ERC-8004 feedback. Scale is `unbounded`.\n"
+            "Output ONLY `category` — junk | quantity. `quality` is NEVER valid on unbounded scale."
+        )
+        cascade = (
+            "CASCADE — stop at the FIRST matching layer:\n\n"
+            + _V8_LAYER_JUNK + "\n\n"
+            + _V8_LAYER_QUANTITY
+        )
+        flow = (
+            "DECISION FLOW (stop at first match):\n"
+            "  1. Tags are clearly spam URLs or pure random characters (no recognisable words)? → junk\n"
+            "  2. Everything else → quantity\n"
+            "     (informal, slang, crypto names, protocol names, meme phrases = quantity on unbounded)"
+        )
+        output = '{"category":"<junk|quantity>","confidence":0.00,"reason":"<one sentence>"}'
+        examples = _V8_EXAMPLES_JUNK_QUANTITY + _V8_EXAMPLES_UNBOUNDED_QUANTITY
+    else:
+        header = (
+            "Classify ERC-8004 feedback. Scale is BOUNDED (pct100/star5/star10/binary).\n"
+            "Output ONLY `category` — junk | quantity | quality."
+        )
+        cascade = (
+            "CASCADE — stop at the FIRST matching layer:\n\n"
+            + _V8_LAYER_JUNK + "\n\n"
+            + _V8_LAYER_QUANTITY + "\n"
+            + _V8_QUANTITY_CARVEOUTS + "\n\n"
+            + _V8_LAYER_QUALITY
+        )
+        flow = (
+            "DECISION FLOW (stop at first match):\n"
+            "  1. Tags are clearly spam URLs or pure random characters? → junk\n"
+            "  2. Tag names a dashboard statistic/metric? → quantity\n"
+            "  3. Everything else → quality\n"
+            "     (when uncertain between junk and quality → ALWAYS choose quality)"
+        )
+        output = '{"category":"<junk|quantity|quality>","confidence":0.00,"reason":"<one sentence>"}'
+        examples = _V8_EXAMPLES_JUNK_QUANTITY + _V8_EXAMPLES_QUALITY + _V8_EXAMPLES_BOUNDED_NOT_JUNK
+
+    system = "\n\n".join([header, cascade, flow, f"OUTPUT — strict JSON, one line, no markdown:\n{output}"]) + "\n"
+    return system + "\n" + examples if include_few_shot else system
+
+
 
 
 def system_prompt_v7_feature(include_few_shot: bool = True) -> str:

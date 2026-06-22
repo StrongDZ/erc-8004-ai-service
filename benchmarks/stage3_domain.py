@@ -32,7 +32,6 @@ EMBED_MODEL = "BAAI/bge-small-en-v1.5"
 
 # Cosine thresholds — empirically tuned (bge-small baseline ~0.30-0.45)
 THRESH_IN_DOMAIN = 0.55
-THRESH_NOT_DOMAIN = 0.35
 
 
 @lru_cache(maxsize=1)
@@ -87,6 +86,33 @@ def _scale_to_label(value_scale: str) -> str:
 class DomainClassifier:
     """Stage 3 FAISS domain classifier. Thread-safe (reads only)."""
 
+    def check_in_domain(
+        self,
+        tag1: str,
+        tag2: str,
+        agent_key: str,
+    ) -> tuple[bool | None, float]:
+        """Check if tags are in the agent's domain.
+
+        Returns (in_domain, best_cos):
+          True  = cosine > THRESH_IN_DOMAIN → in domain
+          False = cosine <= THRESH_IN_DOMAIN → not in domain
+          None  = agent not indexed (caller should use scale_heuristic)
+        """
+        index, key_to_pos = _load_index()
+        pos = key_to_pos.get(agent_key)
+        if pos is None:
+            return None, 0.0
+
+        agent_vec = index.reconstruct(pos)
+        tags = [t for t in (tag1.strip(), tag2.strip()) if t]
+        if not tags:
+            return None, 0.0
+
+        cos_scores = [_cosine_to_agent(t, agent_vec) for t in tags]
+        best_cos = max(cos_scores)
+        return best_cos > THRESH_IN_DOMAIN, best_cos
+
     def classify(
         self,
         tag1: str,
@@ -124,9 +150,6 @@ class DomainClassifier:
         if best_cos > THRESH_IN_DOMAIN:
             label = _scale_to_label(value_scale)
             return label, f"in_domain:cos={best_cos:.3f}"
-
-        if best_cos < THRESH_NOT_DOMAIN:
-            return "junk", f"not_in_domain:cos={best_cos:.3f}"
 
         # Borderline → LLM
         return None, f"borderline:cos={best_cos:.3f}"

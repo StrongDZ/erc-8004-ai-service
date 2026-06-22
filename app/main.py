@@ -31,6 +31,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="erc-8004-ai-service", version="0.1.0", lifespan=lifespan)
+
 app.include_router(classify.router, tags=["classify"])
 app.include_router(summarize.router, tags=["summarize"])
 app.include_router(embed.router, tags=["embed"])
