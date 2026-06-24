@@ -4,16 +4,19 @@
 Pipeline design:
   Stage 0.5  empty-tag rule
   Stage 1    keyword rules
-  Stage 2    Hybrid SVM (TF-IDF + bge, junk included as non_quality)
-             • unbounded scale → SKIP Stage 2 entirely
-             • bounded + quality_prob > threshold → quality
-             • else → Stage 3
-  Stage 3    FAISS in-domain
-             • no metadata → scale_heuristic fallback, else LLM
+  Stage 2    Hybrid SVM (TF-IDF + bge, junk excluded — quality vs quantity only)
+             • quality_prob > quality_thresh + bounded  → quality
+             • quality_prob < quantity_thresh + unbounded → quantity
+             • quality_prob < quantity_thresh + bounded  → quantity
+             • else (uncertain zone)                    → Stage 3
+  Stage 3    FAISS in-domain (independent of Stage 2 outcome)
+             • no metadata → scale_heuristic fallback, else Stage 4
              • in_domain + unbounded → quantity
-             • in_domain + bounded   → LLM (ambiguous, SVM wasn't confident)
-             • not in_domain         → LLM (OOD / junk candidates)
-  Stage 4    LLM (V8 prompt with improved junk layer)
+             • in_domain + bounded   → Stage 4 (ambiguous)
+             • not in_domain         → Stage 4 (OOD / junk candidates)
+  Stage 4    LLM confidence gate (asymmetric — high side only)
+             • quality_prob < llm_hi → LLM (uncertain or low-confidence)
+             • quality_prob >= llm_hi → ML fallback quality (SVM already confident)
 
 Usage:
     cd erc-8004-ai-service
@@ -34,7 +37,7 @@ from sklearn.metrics import classification_report, f1_score
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from benchmarks.per_tag_svm import predict_quality_prob_hybrid, train_hybrid
+from benchmarks.per_tag_svm import predict_qtag_proba, train_qtag_hybrid
 from benchmarks.pipeline_3tier import rule_classify
 from benchmarks.pipeline_3tier_v2 import (
     LLM_MODEL,
@@ -51,17 +54,35 @@ OUT_DIR = ROOT / "data/benchmark_results"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _all_ood(bundle: dict, *tags: str) -> bool:
+    """True when every non-empty tag has an all-zero TF-IDF vector.
+
+    Emojis, gibberish, and non-Latin strings are not in the vocabulary built
+    from training data, so their TF-IDF row is all-zero. When that is the case
+    the SVM decision relies solely on the BGE embedding, which maps OOD inputs
+    near the closest training concept — unreliable for junk detection.
+    Routing these to LLM instead avoids confident misclassification.
+    """
+    tfidf = bundle["tfidf"]
+    present = [t for t in tags if t]
+    return bool(present) and all(tfidf.transform([t]).toarray().sum() == 0 for t in present)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--gold", type=Path, required=True)
     parser.add_argument("--exclude-self", action="store_true")
     parser.add_argument("--skip-llm", action="store_true")
     parser.add_argument("--thresh", type=float, default=SVM_VOTE_THRESH,
-                        help="SVM quality_prob threshold (default 0.70)")
+                        help="SVM quality_prob threshold for bounded scale (default 0.70)")
+    parser.add_argument("--qty-thresh", type=float, default=0.30,
+                        help="SVM quantity threshold: quality_prob < qty_thresh → quantity (default 0.30)")
+    parser.add_argument("--llm-hi", type=float, default=0.60,
+                        help="LLM gate (asymmetric): quality_prob >= llm_hi → ML fallback quality, else LLM (default 0.60)")
     args = parser.parse_args()
 
-    print("Training hybrid SVM (TF-IDF + bge, junk included)...")
-    hybrid_bundle = train_hybrid(save=True)
+    print("Training hybrid SVM (TF-IDF + bge, junk excluded — quality vs quantity)...")
+    qtag_bundle = train_qtag_hybrid(save=True)
 
     print(f"\nLoading gold from {args.gold} ...")
     gold = load_gold(args.gold)
@@ -75,7 +96,9 @@ def main() -> None:
     dc = DomainClassifier()
     use_llm = not args.skip_llm
     thresh = args.thresh
-    print(f"  SVM quality threshold: {thresh}")
+    qty_thresh = args.qty_thresh
+    llm_hi = args.llm_hi
+    print(f"  SVM quality_thresh={thresh}  qty_thresh={qty_thresh}  LLM gate (asymmetric high)={llm_hi}")
 
     y_true = gold["label"].tolist()
     rich_mask = gold["has_agent_metadata"].tolist()
@@ -115,14 +138,17 @@ def main() -> None:
         if cat:
             _rec(cat, "rule"); continue
 
-        # Stage 2: Hybrid SVM — skip entirely for unbounded scale
-        quality_prob = 0.5
-        if not is_unbounded:
-            p1 = predict_quality_prob_hybrid(hybrid_bundle, tag1) if tag1 else 0.5
-            p2 = predict_quality_prob_hybrid(hybrid_bundle, tag2) if tag2 else p1
-            quality_prob = max(p1, p2) if tag2 else p1
-            if quality_prob > thresh:
-                _rec("quality", "hybrid_svm", f"prob={quality_prob:.2f}"); continue
+        # Stage 2: Hybrid SVM (quality vs quantity, junk excluded)
+        p1, _ = predict_qtag_proba(qtag_bundle, tag1) if tag1 else (0.5, 0.5)
+        p2, _ = predict_qtag_proba(qtag_bundle, tag2) if tag2 else (p1, 1 - p1)
+        quality_prob = max(p1, p2) if tag2 else p1
+
+        if quality_prob > thresh and not is_unbounded:
+            _rec("quality", "hybrid_svm", f"prob={quality_prob:.2f}"); continue
+
+        if quality_prob < qty_thresh and is_unbounded:
+            _rec("quantity", "hybrid_svm_qty_unbounded", f"prob={quality_prob:.2f}"); continue
+
 
         # Stage 3: FAISS in-domain check
         in_domain, best_cos = dc.check_in_domain(tag1, tag2, agent_key)
@@ -138,40 +164,51 @@ def main() -> None:
             # bounded + in_domain: SVM was not confident → LLM decides
         # not in_domain or (in_domain + bounded) → fall to LLM
 
-        # Stage 4: LLM
-        if use_llm:
+        # Stage 4: LLM gate (asymmetric — high side only).
+        # quality_prob >= llm_hi: SVM is already confident quality even though it
+        # didn't hit quality_thresh at Stage 2 (e.g. unbounded scale held it back).
+        # Save the LLM call; classify as quality via ML fallback.
+        # Below llm_hi: call LLM — the SVM signal is not reliable enough here.
+        if use_llm and quality_prob < llm_hi:
             llm_cat = llm_classify(row, LLM_MODEL)
             _rec(llm_cat, "llm"); llm_count += 1
         else:
             guess = "quality" if quality_prob >= 0.50 else "quantity"
-            _rec(guess, "ml_default", f"prob={quality_prob:.2f}")
+            src   = "ml_fallback" if use_llm else "ml_default"
+            _rec(guess, src, f"prob={quality_prob:.2f}")
 
     elapsed = time.time() - t0
-    mf1 = f1_score(y_true, preds, labels=LLM_OUTPUT_CATEGORIES, average="macro", zero_division=0)
+    mf1  = f1_score(y_true, preds, labels=LLM_OUTPUT_CATEGORIES, average="macro",    zero_division=0)
+    wf1  = f1_score(y_true, preds, labels=LLM_OUTPUT_CATEGORIES, average="weighted", zero_division=0)
 
-    print(f"\n{'='*60}")
-    print(f"  Run 12: Hybrid SVM → FAISS unbounded → LLM")
-    print(f"  Macro F1: {mf1:.4f}   N={len(gold)}")
-    print(f"{'='*60}")
-    print(classification_report(y_true, preds, labels=LLM_OUTPUT_CATEGORIES, zero_division=0))
+    sep = "=" * 70
+    print(f"\n{sep}")
+    print(f"  Run 12 (junk-excl SVM + qty_thresh)   N={len(gold)}")
+    print(sep)
+    print(classification_report(y_true, preds, labels=LLM_OUTPUT_CATEGORIES,
+                                digits=3, zero_division=0))
+    print(f"  Macro F1   : {mf1:.4f}")
+    print(f"  Weighted F1: {wf1:.4f}")
 
     stage_counts: dict[str, int] = {}
     for s in sources:
         stage_counts[s] = stage_counts.get(s, 0) + 1
+    print(f"\n  Stage breakdown:")
     for s, n in sorted(stage_counts.items(), key=lambda x: -x[1]):
-        print(f"  {s}: {n} ({n/len(sources)*100:.1f}%)")
-    print(f"  LLM calls: {llm_count} ({llm_count/len(gold)*100:.1f}%)  "
-          f"elapsed: {elapsed:.1f}s")
+        print(f"    {s}: {n} ({n/len(sources)*100:.1f}%)")
+    print(f"  LLM calls : {llm_count} ({llm_count/len(gold)*100:.1f}%)   elapsed: {elapsed:.1f}s")
 
-    def _sub_f1(mask, name):
+    def _sub_metrics(mask: list[bool], name: str) -> tuple[float, float]:
         st = [y for y, m in zip(y_true, mask) if m]
         sp = [p for p, m in zip(preds, mask) if m]
-        f = f1_score(st, sp, labels=LLM_OUTPUT_CATEGORIES, average="macro", zero_division=0)
-        print(f"  [{name} N={sum(mask)}] Macro F1: {f:.4f}")
-        return f
+        mf = f1_score(st, sp, labels=LLM_OUTPUT_CATEGORIES, average="macro",    zero_division=0)
+        wf = f1_score(st, sp, labels=LLM_OUTPUT_CATEGORIES, average="weighted", zero_division=0)
+        print(f"  [{name:10s} N={sum(mask):4d}]  Macro F1={mf:.4f}  Weighted F1={wf:.4f}")
+        return mf, wf
 
-    f_rich = _sub_f1(rich_mask, "Gold-Rich")
-    f_poor = _sub_f1(poor_mask, "Gold-Poor")
+    print()
+    f_rich_m, f_rich_w = _sub_metrics(rich_mask, "Gold-Rich")
+    f_poor_m, f_poor_w = _sub_metrics(poor_mask, "Gold-Poor")
 
     audit_df = pd.DataFrame(audit_rows)
     junk_rows = audit_df[audit_df["true_label"] == "junk"]
@@ -187,9 +224,11 @@ def main() -> None:
 
     out_path = OUT_DIR / f"pipeline_run12_{ts}.json"
     out_path.write_text(json.dumps({
-        "name": "Run 12: Hybrid SVM → FAISS unbounded → LLM",
-        "macro_f1": mf1, "stage_counts": stage_counts,
-        "f1_rich": f_rich, "f1_poor": f_poor,
+        "name": "Run 12 (junk-excl SVM + qty_thresh)",
+        "macro_f1": mf1, "weighted_f1": wf1,
+        "f1_rich_macro": f_rich_m, "f1_rich_weighted": f_rich_w,
+        "f1_poor_macro": f_poor_m, "f1_poor_weighted": f_poor_w,
+        "stage_counts": stage_counts,
         "llm_calls": llm_count, "audit_csv": str(audit_path),
     }, indent=2))
     print(f"  Results saved to {out_path}")

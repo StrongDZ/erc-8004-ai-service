@@ -557,5 +557,87 @@ def predict_qtag_proba(bundle: dict, tag: str) -> tuple[float, float]:
     return float(proba[quality_idx]), float(proba[quantity_idx])
 
 
+MODEL_BGE_QUALITY_GATE_PATH = MODEL_DIR / "per_tag_svm_bge_quality_gate.joblib"
+
+
+def train_bge_quality_gate(
+    save: bool = True,
+    model_path: Path | None = None,
+) -> object:
+    """Train the one-directional "quality-only" Stage-2 gate (production design,
+    mirrors benchmarks/pipeline_run13.py).
+
+    Unlike train(), vote_per_tag(), and every other per-tag SVM in this module,
+    this classifier's probability is NEVER used to assert "quantity" or
+    "non_quality" — only ever to assert "quality" at a high threshold. Auditing
+    the symmetric tie-breaks used elsewhere in this module showed they are wrong
+    more often than right when they fire on the "quantity" side (low confidence
+    reflects unfamiliar business/service-domain vocabulary, not evidence of a
+    metric), so the caller must escalate every record this gate does not
+    confidently mark "quality" rather than use a complementary low-confidence
+    threshold.
+
+    Features: BGE embedding of "<tag> <scale>" (scale included, unlike
+    train_bge()/train_hybrid(), because the inverted scale distribution that
+    motivated dropping it there does not apply once the classifier is never
+    asked to assert "quantity"). Junk is excluded from training (quality-vs-
+    quantity binary only), consistent with train_qtag_hybrid() and the
+    confirmed finding that mixing junk into this SVM's training set degrades
+    even the one-directional "quality" decision.
+    """
+    import numpy as np
+    from benchmarks.stage3_domain import _encode
+
+    print("Loading training data (junk excluded, tag+scale features)...")
+    group_a = pd.read_parquet(DATA_DIR / "group_a.parquet")
+    group_b = pd.read_parquet(DATA_DIR / "group_b.parquet")
+    df_all = pd.concat([group_a, group_b], ignore_index=True)
+    n_before = len(df_all)
+    df_all = df_all[df_all["label"].isin(["quality", "quantity"])].reset_index(drop=True)
+    print(f"  Dropped {n_before - len(df_all)} junk rows -> {len(df_all)} records")
+
+    texts, labels = [], []
+    for _, r in df_all.iterrows():
+        lbl = 1 if r["label"] == "quality" else 0
+        scale = str(r.get("value_scale") or "").strip().lower()
+        t1 = str(r.get("tag1") or "").strip().lower()
+        t2 = str(r.get("tag2") or "").strip().lower()
+        if t1:
+            texts.append(f"{t1} {scale}"); labels.append(lbl)
+        if t2:
+            texts.append(f"{t2} {scale}"); labels.append(lbl)
+
+    y = np.array(labels)
+    print(f"  Per-tag rows: {len(texts)}  (quality={y.sum()}, quantity={(y==0).sum()})")
+
+    print("  Encoding with bge-small-en-v1.5 ...")
+    X = np.array([_encode(t) for t in texts])
+
+    clf = CalibratedClassifierCV(LinearSVC(C=0.3, max_iter=2000), cv=3, method="sigmoid")
+    print("  Training calibrated LinearSVC (C=0.3) ...")
+    clf.fit(X, y)
+
+    preds_tr = clf.predict(X)
+    print(classification_report(y, preds_tr, target_names=["quantity", "quality"]))
+
+    if save:
+        out_path = model_path or MODEL_BGE_QUALITY_GATE_PATH
+        joblib.dump(clf, out_path)
+        print(f"Saved to {out_path}")
+    return clf
+
+
+def predict_quality_gate_prob(clf: object, tag: str, scale: str) -> float:
+    """Quality probability for the one-directional gate. Caller must treat any
+    value below the deployed threshold as "not confident", never as evidence
+    for "quantity"."""
+    from benchmarks.stage3_domain import _encode
+
+    vec = _encode(f"{tag.strip().lower()} {scale.strip().lower()}").reshape(1, -1)
+    proba = clf.predict_proba(vec)[0]
+    quality_idx = list(clf.classes_).index(1)
+    return float(proba[quality_idx])
+
+
 if __name__ == "__main__":
     train(save=True)

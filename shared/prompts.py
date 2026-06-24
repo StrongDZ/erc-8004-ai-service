@@ -292,14 +292,7 @@ LAYER 1 — junk  (STRICT — default to the next layer when uncertain)
   A tag is junk ONLY if it clearly falls into one of these categories:
   • Pure random characters: no recognizable words in any language or domain
     (e.g. "xkqzw", bare UUID, bare digit string "666" with no measurement label).
-  • Emoji-only or emoji-dominated: tag content is entirely or primarily decorative emojis
-    with no accompanying agent-relevant text (rating stars used as the scale field are
-    handled by the scale system, not the tag — emojis AS the tag itself are junk).
   • Spam: promo URLs (https://, t.me/), vote-rigging phrases ("top 1 rank", "#1 agent").
-  • Real-world proper names with NO plausible connection to AI/agent functionality:
-    human personal names, religious figures, fictional TV/film characters, celebrity names.
-    Test whether the name could describe an agent capability, service, or domain action —
-    if it cannot, it is junk.
   • Developer test/placeholder strings: tags containing patterns that signal a non-production
     entry such as _test, -test, test_, debug, placeholder, sample, or a bare small integer
     ("10", "0") with no units when paired with no meaningful second tag.
@@ -312,12 +305,22 @@ _V8_LAYER_QUANTITY = """\
 LAYER 2 — quantity  (measured STATISTIC / METRIC / INDEX only)
   Tag names a number you would put on a dashboard:
   rate, ratio, count, amount, P/L, volume, speed, latency, uptime, freshness,
-  coefficient, risk-score, credit-score, win-rate, success-rate, completion-rate."""
+  coefficient, risk-score, credit-score, win-rate, success-rate, completion-rate.
+  Evaluate tag1 and tag2 INDEPENDENTLY against this layer: if EITHER tag alone
+  is a clear dashboard metric, the record is quantity — even when the other tag
+  names a domain action or business concept that would read as Layer 3 on its
+  own. A clear metric name is never outvoted by a co-occurring domain-flavoured
+  tag; Layer 2 is checked, and can fire, before you consider what the pair
+  "feels like" together."""
 
 # Carve-outs only relevant when Layer 3 exists (bounded prompt only).
 _V8_QUANTITY_CARVEOUTS = """\
   • NOT quantity: domain action/operation (swap, trade, stake, mint, match-played) → quality.
-  • NOT quantity: trust/reputation indicators (trust-score, reputation) → quality."""
+  • NOT quantity: trust/reputation indicators (trust-score, reputation) → quality.
+  • STILL quantity: a Layer 2 metric tag paired with a domain-action/business tag
+    (e.g. "accuracy"|"price-feed", "success-rate"|"transparency", "trading-yield"|
+    "consistency") — the metric tag alone decides; the second tag's domain flavour
+    does not pull the pair up to Layer 3."""
 
 _V8_LAYER_QUALITY = """\
 LAYER 3 — quality  (DEFAULT for all remaining bounded records)
@@ -381,6 +384,22 @@ _V8_EXAMPLES_UNBOUNDED_QUANTITY = """
 # quantity — casual/slang tag on unbounded (informal ≠ junk)
 <feedback><tag2>lit fr fr</tag2><scale>unbounded</scale></feedback>
 => {"category":"quantity","confidence":0.75,"reason":"Layer 2: informal word but contains meaning; unbounded → quantity"}"""
+
+
+_V8_EXAMPLES_METRIC_OUTRANKS_DOMAIN = """
+
+# quantity — metric tag outranks a domain-action second tag
+<feedback><tag1>accuracy</tag1><tag2>price-feed</tag2><scale>pct100</scale></feedback>
+=> {"category":"quantity","confidence":0.90,"reason":"Layer 2: accuracy is a dashboard metric; price-feed (domain action) does not override it"}
+
+# quantity — metric tag outranks a domain-flavoured second tag
+<feedback><tag1>success-rate</tag1><tag2>transparency</tag2><scale>pct100</scale></feedback>
+=> {"category":"quantity","confidence":0.90,"reason":"Layer 2: success-rate is a measured statistic; transparency alone would be quality but does not outvote a clear metric tag"}
+
+# quantity — metric tag outranks a business-concept second tag
+<feedback><tag1>trading-yield</tag1><tag2>consistency</tag2><scale>pct100</scale></feedback>
+=> {"category":"quantity","confidence":0.88,"reason":"Layer 2: trading-yield is a quantitative performance metric; evaluate tag1 and tag2 independently, do not let consistency's quality flavour win"}
+"""
 
 
 _V8_EXAMPLES_BOUNDED_NOT_JUNK = """
@@ -451,7 +470,12 @@ def system_prompt_v8_category(include_few_shot: bool = True, scale: str = "") ->
             "     (when uncertain between junk and quality → ALWAYS choose quality)"
         )
         output = '{"category":"<junk|quantity|quality>","confidence":0.00,"reason":"<one sentence>"}'
-        examples = _V8_EXAMPLES_JUNK_QUANTITY + _V8_EXAMPLES_QUALITY + _V8_EXAMPLES_BOUNDED_NOT_JUNK
+        examples = (
+            _V8_EXAMPLES_JUNK_QUANTITY
+            + _V8_EXAMPLES_METRIC_OUTRANKS_DOMAIN
+            + _V8_EXAMPLES_QUALITY
+            + _V8_EXAMPLES_BOUNDED_NOT_JUNK
+        )
 
     system = "\n\n".join([header, cascade, flow, f"OUTPUT — strict JSON, one line, no markdown:\n{output}"]) + "\n"
     return system + "\n" + examples if include_few_shot else system

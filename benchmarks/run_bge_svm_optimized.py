@@ -197,7 +197,7 @@ def main():
     # We sweep SVM_VOTE_THRESH and tb_thresh
     results = []
     print("\nSweeping threshold combinations...")
-    print(f"{'SVM_THRESH':10} | {'TB_THRESH':10} | {'Macro F1':10} | {'F1 Ex Junk':10} | {'Quality Rec':11} | {'Qty Rec':9} | {'LLM Calls':9}")
+    print(f"{'SVM_THRESH':10} | {'TB_THRESH':10} | {'Macro F1':10} | {'Wtd F1':10} | {'F1 Ex Junk':10} | {'Quality Rec':11} | {'Qty Rec':9} | {'LLM Calls':9}")
     print("-" * 80)
     
     for svm_t in [0.60, 0.65, 0.70, 0.75, 0.80]:
@@ -242,8 +242,9 @@ def main():
                 
             # Compute F1 scores
             f1_all = f1_score(y_true, preds, labels=LLM_OUTPUT_CATEGORIES, average="macro", zero_division=0)
-            
-            # Sub-score excluding 7 junk records
+            wf1_all = f1_score(y_true, preds, labels=LLM_OUTPUT_CATEGORIES, average="weighted", zero_division=0)
+
+            # Sub-score excluding junk records (count varies — may be 3 or 7 depending on gold version)
             gold_clean_indices = [i for i, y in enumerate(y_true) if y != "junk"]
             y_true_clean = [y_true[i] for i in gold_clean_indices]
             preds_clean = [preds[i] for i in gold_clean_indices]
@@ -255,40 +256,47 @@ def main():
             qty_rec = rep["quantity"]["recall"]
             
             tb_str = str(tb_t) if tb_t is not None else "None (R5)"
-            print(f"{svm_t:<10.2f} | {tb_str:<10} | {f1_all:<10.4f} | {f1_clean:<10.4f} | {qual_rec:<11.4f} | {qty_rec:<9.4f} | {llm_calls:<9}")
-            
+            print(f"{svm_t:<10.2f} | {tb_str:<10} | {f1_all:<10.4f} | {wf1_all:<10.4f} | {f1_clean:<10.4f} | {qual_rec:<11.4f} | {qty_rec:<9.4f} | {llm_calls:<9}")
+
             results.append({
                 "svm_thresh": svm_t,
                 "tb_thresh": tb_t,
                 "f1_all": f1_all,
+                "wf1_all": wf1_all,
                 "f1_clean": f1_clean,
                 "qual_rec": qual_rec,
                 "qty_rec": qty_rec,
                 "llm_calls": llm_calls,
                 "preds": preds
             })
-            
-    # Find best configuration by F1 Ex Junk
-    best_res = max(results, key=lambda x: x["f1_clean"])
-    print("\n" + "=" * 60)
-    print(f"BEST CONFIGURATION (by F1 Ex Junk):")
-    print(f"  SVM Thresh: {best_res['svm_thresh']}")
-    print(f"  Tie-break Thresh: {best_res['tb_thresh'] if best_res['tb_thresh'] is not None else 'None (R5)'}")
-    print(f"  Macro F1 (all 3 classes): {best_res['f1_all']:.4f}")
-    print(f"  Macro F1 (ex junk):       {best_res['f1_clean']:.4f}")
-    print(f"  Quality Recall:           {best_res['qual_rec']:.4f}")
-    print(f"  Quantity Recall:          {best_res['qty_rec']:.4f}")
-    print(f"  LLM Calls:                {best_res['llm_calls']} ({best_res['llm_calls']/len(gold)*100:.1f}%)")
-    print("=" * 60)
-    
-    # Detailed report for the best config
-    print("\nClassification Report for Best Config (All 3 classes):")
-    print(classification_report(y_true, best_res["preds"], labels=LLM_OUTPUT_CATEGORIES, zero_division=0))
+
+    # Report best by both criteria — Weighted F1 is the priority metric given
+    # severe class imbalance (quality 82%, quantity 17%, junk <1%), Macro F1 kept
+    # for cross-reference with earlier (pre-relabel) experiments.
+    best_wf1 = max(results, key=lambda x: x["wf1_all"])
+    best_mf1 = max(results, key=lambda x: x["f1_all"])
+    for label, best_res in [("BEST BY WEIGHTED F1 (priority metric)", best_wf1),
+                            ("BEST BY MACRO F1 (cross-reference)", best_mf1)]:
+        print("\n" + "=" * 60)
+        print(f"{label}:")
+        print(f"  SVM Thresh: {best_res['svm_thresh']}")
+        print(f"  Tie-break Thresh: {best_res['tb_thresh'] if best_res['tb_thresh'] is not None else 'None (R5)'}")
+        print(f"  Weighted F1 (all 3 classes): {best_res['wf1_all']:.4f}")
+        print(f"  Macro F1 (all 3 classes):    {best_res['f1_all']:.4f}")
+        print(f"  Macro F1 (ex junk):          {best_res['f1_clean']:.4f}")
+        print(f"  Quality Recall:              {best_res['qual_rec']:.4f}")
+        print(f"  Quantity Recall:             {best_res['qty_rec']:.4f}")
+        print(f"  LLM Calls:                   {best_res['llm_calls']} ({best_res['llm_calls']/len(gold)*100:.1f}%)")
+        print("=" * 60)
+        print(classification_report(y_true, best_res["preds"], labels=LLM_OUTPUT_CATEGORIES, zero_division=0))
+
+    best_res = best_wf1
     
     # Let's save a summary json file
     output_summary = {
         "best_svm_thresh": best_res["svm_thresh"],
         "best_tb_thresh": best_res["tb_thresh"],
+        "wf1_all": best_res["wf1_all"],
         "f1_all": best_res["f1_all"],
         "f1_clean": best_res["f1_clean"],
         "qual_rec": best_res["qual_rec"],
@@ -298,6 +306,7 @@ def main():
             {
                 "svm_thresh": r["svm_thresh"],
                 "tb_thresh": r["tb_thresh"],
+                "wf1_all": r["wf1_all"],
                 "f1_all": r["f1_all"],
                 "f1_clean": r["f1_clean"],
                 "qual_rec": r["qual_rec"],
@@ -311,6 +320,13 @@ def main():
     out_path = DATA_DIR / "benchmark_results" / "bge_svm_sweep_summary.json"
     out_path.write_text(json.dumps(output_summary, indent=2))
     print(f"Summary written to {out_path}")
+
+    # Audit dump for the weighted-F1 best config — needed to inspect junk records
+    junk_idx = [i for i, y in enumerate(y_true) if y == "junk"]
+    print("\nJunk records (best-by-weighted-F1 config):")
+    for i in junk_idx:
+        row = gold.iloc[i]
+        print(f"  {row.get('tag1','')!r} | {row.get('tag2','')!r} -> pred={best_wf1['preds'][i]}")
 
 if __name__ == "__main__":
     main()

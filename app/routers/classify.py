@@ -270,7 +270,7 @@ def _three_tier_classify(req: ClassifyRequest) -> ClassifyResponse:
         llm_classify_fn=llm_fallback,
     )
 
-    model_ver = "3tier-svm+bge-small"
+    model_ver = "3tier-svm-bge-gate+mandatory-escalation"
     if res.source == "llm":
         model_ver = f"3tier+llm({DEFAULT_OLLAMA_MODEL})"
 

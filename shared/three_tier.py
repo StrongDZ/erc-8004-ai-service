@@ -1,20 +1,38 @@
 """shared/three_tier.py — production 3-tier feedback classifier.
 
-Mirrors the benchmark pipeline (benchmarks/pipeline_3tier_v2.py, Run 4 = rule +
-per-tag SVM + agent-domain cosine, NO LLM — the benchmark's best config on the
-de-duplicated, self-feedback-excluded test set: MacroF1 0.814).
+Mirrors the benchmark pipeline (benchmarks/pipeline_run13.py, "mandatory
+escalation" — the configuration that wins on every reliably-measurable
+accuracy axis (two-class Macro F1, quantity F1, quantity recall) once the
+3-record junk class is set aside as too small to rank configurations by; see
+the thesis evaluation chapter for the full audit).
 
 The rule cascade (Stage 0 self-feedback gate, Stage 1 rule lookups) runs in the
 Go classifier; records Go escalates to "others" reach this module, which runs:
 
-  Stage 2   per-tag binary SVM      TF-IDF + calibrated LinearSVC, symmetric vote.
-  Stage 3   agent-domain cosine     max cos(tag, agent_domain_text), embedded on
-                                    the fly with bge-small (no prebuilt index,
-                                    no agent_key dependency). in-domain bounded
-                                    -> quality, in-domain unbounded -> quantity.
-  Stage 4   LLM                     no agent metadata OR a borderline cosine goes
-                                    straight to the LLM. No ML default or scale
-                                    heuristic — the LLM resolves these residuals.
+  Stage 2   per-tag BGE quality gate   one-directional: the SVM may only ever
+                                        assert "quality", at a high threshold.
+                                        It is NEVER used to assert "quantity" or
+                                        "non_quality" — an audited failure mode
+                                        (low confidence on unfamiliar business-
+                                        /service-domain vocabulary, not evidence
+                                        of a metric) made every symmetric or
+                                        scale-default alternative tried less
+                                        accurate than just escalating instead.
+  Stage 3   agent-domain cosine        max cos(tag, agent_domain_text), embedded
+                                        on the fly with bge-small (no prebuilt
+                                        index, no agent_key dependency).
+                                        in-domain + unbounded -> quantity (safe:
+                                        the scale convention makes this
+                                        structural, not a guess). in-domain +
+                                        bounded, with Stage 2 not confident,
+                                        is NOT resolved here — see Stage 4.
+  Stage 4   LLM                        every record Stage 2/3 did not resolve
+                                        with genuine evidence goes here: no
+                                        agent metadata, a borderline cosine, OR
+                                        an in-domain-but-bounded record with no
+                                        confident "quality" signal. No ML
+                                        default or scale heuristic ever guesses
+                                        "quantity" in this module.
 
 Convention (gold-aligned): quality is only a positive bounded score, so an
 unbounded scale (or a negative value, which maps to unbounded) is NEVER quality.
@@ -23,9 +41,9 @@ is junk. The Go rule engine therefore escalates unknown unbounded tags to this
 module rather than force-labelling them quantity; here the junk-vs-quantity split
 is decided by content (agent-domain cosine, or the LLM), not by scale.
 
-The per-tag SVM inference (predict_quality_prob, vote_per_tag) is duplicated from
+The per-tag SVM inference (predict_quality_gate_prob) is duplicated from
 benchmarks/per_tag_svm.py on purpose: production must not import research code.
-Both share the serialized artifact data/models/per_tag_svm.joblib.
+Both share the serialized artifact data/models/per_tag_svm_bge_quality_gate.joblib.
 """
 from __future__ import annotations
 
@@ -41,11 +59,13 @@ import numpy as np
 from .oasf_enrich import agent_domain_text
 
 ROOT = Path(__file__).resolve().parent.parent
-SVM_MODEL_PATH = ROOT / "data/models/per_tag_svm.joblib"
+SVM_MODEL_PATH = ROOT / "data/models/per_tag_svm_bge_quality_gate.joblib"
 
-# Cosine thresholds — empirically tuned on bge-small (benchmark stage3_domain.py).
+# Cosine/SVM thresholds — empirically tuned on bge-small (benchmark stage3_domain.py,
+# benchmarks/pipeline_run13.py). SVM_QUALITY_THRESH is a one-directional bar: it is
+# never compared against its complement to assert the opposite class.
 DOMAIN_EMBED_MODEL = "BAAI/bge-small-en-v1.5"
-SVM_VOTE_THRESH = 0.70
+SVM_QUALITY_THRESH = 0.80
 THRESH_IN_DOMAIN = 0.55
 
 # Mirrors Go infraTagSet (rule_patterns.go) — generic infra/protocol signals that apply
@@ -95,41 +115,24 @@ class ThreeTierResult:
 
 @lru_cache(maxsize=1)
 def load_svm():
-    """Load the serialized per-tag SVM (internal artifact written by train())."""
+    """Load the serialized BGE quality-gate classifier (artifact written by
+    benchmarks.per_tag_svm.train_bge_quality_gate()).
+
+    joblib.load is safe here: SVM_MODEL_PATH is a fixed, internal artifact path
+    written only by this codebase's own training script, never derived from
+    user-supplied input or an external/untrusted source."""
     return joblib.load(SVM_MODEL_PATH)
 
 
-def _quality_prob(pipe, tag: str, scale: str) -> float:
-    """Quality probability [0,1] for one tag+scale (same feature text as training)."""
-    text = f"tag={tag} | scale={scale}"
-    proba = pipe.predict_proba([text])[0]
-    quality_idx = list(pipe.classes_).index(1)  # classes_[1] == 1 (quality)
+def _quality_prob(encoder, clf, tag: str, scale: str) -> float:
+    """One-directional quality probability via BGE embedding of "<tag> <scale>".
+
+    Only ever compared against SVM_QUALITY_THRESH to assert "quality"; a low
+    value must NOT be read as evidence for "quantity" (see module docstring)."""
+    vec = encoder.encode([f"{tag.strip().lower()} {scale.strip().lower()}"], normalize_embeddings=True)[0]
+    proba = clf.predict_proba([np.asarray(vec, dtype="float32")])[0]
+    quality_idx = list(clf.classes_).index(1)  # classes_[1] == 1 (quality)
     return float(proba[quality_idx])
-
-
-def _vote(p1: float, p2: float, t2_empty: bool, thresh: float = SVM_VOTE_THRESH) -> str | None:
-    """Symmetric per-tag vote: quality if p>=thresh, non_quality if p<=1-thresh.
-    Returns 'quality', 'non_quality', or None (escalate to Stage 3)."""
-
-    def _confident(p: float) -> str | None:
-        if p >= thresh:
-            return "quality"
-        if p <= 1.0 - thresh:
-            return "non_quality"
-        return None
-
-    c1 = _confident(p1)
-    c2 = None if t2_empty else _confident(p2)
-    if t2_empty:
-        return c1
-    if c1 is not None and c2 is not None:
-        return c1 if c1 == c2 else None  # real conflict -> Stage 3
-    return c1 if c1 is not None else c2
-
-
-def _scale_to_label(scale: str) -> str:
-    """In-domain: scale decides. Unbounded -> quantity, bounded -> quality."""
-    return "quantity" if scale == "unbounded" else "quality"
 
 
 def _llm_resolve(
@@ -184,20 +187,23 @@ def classify_three_tier(
     """
     t1, t2 = (tag1 or "").strip(), (tag2 or "").strip()
     sc = (scale or "").strip().lower()
-    pipe = load_svm()
+    is_unbounded = sc == "unbounded"
+    clf = load_svm()
 
     def _result(cat, conf, reason, source):
         feat = _infer_feature(t1, t2, cat, source)
         return ThreeTierResult(cat, float(max(0.0, min(1.0, conf))), reason, source, feature=feat)
 
-    # Stage 2 — per-tag SVM vote.
-    p1 = _quality_prob(pipe, t1, sc) if t1 else 0.5
-    p2 = _quality_prob(pipe, t2, sc) if t2 else 0.5
-    vote = _vote(p1, p2, t2_empty=not t2)
-    if vote == "quality":
-        return _result("quality", max(p1, p2), f"svm vote quality (p1={p1:.2f},p2={p2:.2f})", "three_tier_svm")
+    # Stage 2 — one-directional BGE quality gate. May only ever assert "quality";
+    # never used to assert "quantity" (unbounded is structurally never quality,
+    # so the gate cannot fire there either — see module docstring).
+    p1 = _quality_prob(encoder, clf, t1, sc) if t1 else 0.0
+    p2 = _quality_prob(encoder, clf, t2, sc) if t2 else 0.0
+    quality_prob = max(p1, p2) if t2 else p1
+    if quality_prob > SVM_QUALITY_THRESH and not is_unbounded:
+        return _result("quality", quality_prob, f"svm quality_prob={quality_prob:.2f}", "three_tier_svm")
 
-    # Stage 3 — agent-domain cosine (vote == non_quality or None).
+    # Stage 3 — agent-domain cosine (Stage 2 not confident).
     tags = [t for t in (t1, t2) if t]
     agent_text = (agent_text or "").strip()
 
@@ -207,7 +213,15 @@ def classify_three_tier(
 
     best_cos = _domain_best_cos(encoder, tags, agent_text)
     if best_cos > THRESH_IN_DOMAIN:
-        return _result(_scale_to_label(sc), min(1.0, best_cos), f"in-domain cos={best_cos:.3f}", "three_tier_domain")
+        if is_unbounded:
+            # Safe to resolve here: the scale convention makes "quantity" structural,
+            # not a probabilistic guess (unbounded can never be "quality").
+            return _result("quantity", min(1.0, best_cos), f"in-domain unbounded cos={best_cos:.3f}", "three_tier_domain")
+        # In-domain but bounded, with Stage 2 not confidently "quality": mandatory
+        # escalation. Asserting "quality" here by default, or "quantity" via a
+        # low-confidence tie-break, were both audited and found less accurate
+        # than escalating (see module docstring) — never guess in this branch.
+        return _llm_resolve(llm_classify_fn, f"in_domain_bounded_low_conf cos={best_cos:.3f},prob={quality_prob:.2f}")
 
-    # Stage 4 — borderline cosine -> LLM (no ML default).
+    # Stage 4 — borderline/not-in-domain cosine -> LLM (no ML default).
     return _llm_resolve(llm_classify_fn, f"borderline_cos={best_cos:.3f}")

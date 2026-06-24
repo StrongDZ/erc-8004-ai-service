@@ -74,12 +74,10 @@ def _row_features(
 
 
 def train_combiner(qtag_bundle: dict) -> LogisticRegression:
-    print(f"Training combiner on {TRAIN_PATH.name} (junk excluded, 0 ID overlap with gold verified)...")
+    print(f"Training combiner on {TRAIN_PATH.name} (3-class: quality/quantity/junk, 0 ID overlap with gold verified)...")
     df = pd.read_parquet(TRAIN_PATH).fillna("")
-    # Combiner only classifies quality and quantity — junk excluded.
-    n_before = len(df)
-    df = df[df["label"].isin(["quality", "quantity"])].reset_index(drop=True)
-    print(f"  Dropped {n_before - len(df)} junk rows -> {len(df)} records")
+    # Junk included: SVM is OOD for junk (svm_p1≈svm_p2≈0.5), combiner learns
+    # to use that uncertainty as the junk signal.
     df["agent_key"] = df["chain_id"].astype(str) + ":" + df["agent_id"].astype(str)
     X, y = [], []
     for _, r in df.iterrows():
