@@ -65,10 +65,11 @@ def _cosine_to_agent(tag: str, agent_vec: np.ndarray) -> float:
     return float(np.dot(tag_vec, agent_vec))
 
 
-def scale_heuristic(value_scale: str, value_decimals: int) -> str | None:
-    """Fallback when agent has no FAISS vector. Returns quality/quantity/None."""
+def scale_heuristic(value_scale: str) -> str | None:
+    """Fallback when agent has no FAISS vector — decided by scale alone.
+    Returns quality/quantity/None."""
     s = (value_scale or "").strip().lower()
-    if s == "unbounded" or value_decimals > 0:
+    if s == "unbounded":
         return "quantity"
     if s in ("star5", "star10", "binary"):
         return "quality"
@@ -130,7 +131,7 @@ class DomainClassifier:
 
         if pos is None:
             # Agent not indexed — use value_scale heuristic
-            label = scale_heuristic(value_scale, value_decimals)
+            label = scale_heuristic(value_scale)
             reason = f"no_metadata_heuristic:scale={value_scale},decimals={value_decimals}"
             return label, reason
 
@@ -141,7 +142,7 @@ class DomainClassifier:
         tags = [t for t in (tag1.strip(), tag2.strip()) if t]
         if not tags:
             # Empty tags → use heuristic
-            label = scale_heuristic(value_scale, value_decimals)
+            label = scale_heuristic(value_scale)
             return label, "no_tags_heuristic"
 
         cos_scores = [_cosine_to_agent(t, agent_vec) for t in tags]

@@ -56,7 +56,7 @@ from typing import Callable
 import joblib
 import numpy as np
 
-from .oasf_enrich import agent_domain_text
+from .oasf_enrich import agent_domain_text_full
 
 ROOT = Path(__file__).resolve().parent.parent
 SVM_MODEL_PATH = ROOT / "data/models/per_tag_svm_bge_quality_gate.joblib"
@@ -65,7 +65,7 @@ SVM_MODEL_PATH = ROOT / "data/models/per_tag_svm_bge_quality_gate.joblib"
 # benchmarks/pipeline_run13.py). SVM_QUALITY_THRESH is a one-directional bar: it is
 # never compared against its complement to assert the opposite class.
 DOMAIN_EMBED_MODEL = "BAAI/bge-small-en-v1.5"
-SVM_QUALITY_THRESH = 0.80
+SVM_QUALITY_THRESH = 0.70
 THRESH_IN_DOMAIN = 0.55
 
 # Mirrors Go infraTagSet (rule_patterns.go) — generic infra/protocol signals that apply
@@ -82,14 +82,15 @@ _INFRA_TAGS: frozenset[str] = frozenset({
 })
 
 
-def _infer_feature(tag1: str, tag2: str, category: str, source: str) -> str:
-    """Heuristic feature inference for 3-tier results (no LLM context available).
+def _infer_feature(tag1: str, tag2: str, category: str, in_domain: bool | None) -> str:
+    """Derive feature from FAISS in_domain signal + tag heuristics.
 
-    Logic mirrors Go featureOf() and adds source-based signals:
-    - junk                → ""  (no feature — noise)
-    - tag in infraTagSet  → "infrastructure"  (generic protocol/infra signal)
-    - classified via agent-domain cosine (source contains 'domain') → "agent_domain"
-    - fallback            → "agent_domain"  (default: business-specific)
+    Priority order:
+    - junk                           → ""   (noise, no feature)
+    - tag in infraTagSet             → "infrastructure"  (protocol/infra signal)
+    - in_domain=True  (cos > 0.55)   → "agent_domain"
+    - in_domain=False, quantity      → "infrastructure"  (metric outside agent domain)
+    - fallback                       → "agent_domain"  (default: assume business-specific)
     """
     if category == "junk":
         return ""
@@ -97,10 +98,10 @@ def _infer_feature(tag1: str, tag2: str, category: str, source: str) -> str:
     t2 = tag2.strip().lower()
     if t1 in _INFRA_TAGS or t2 in _INFRA_TAGS:
         return "infrastructure"
-    # Source signal: agent-domain cosine stage explicitly matched the agent domain
-    if "domain" in source:
+    if in_domain is True:
         return "agent_domain"
-    # Default for quality/quantity determined by SVM or scale heuristic
+    if in_domain is False and category == "quantity":
+        return "infrastructure"
     return "agent_domain"
 
 
@@ -165,9 +166,29 @@ def _domain_best_cos(encoder, tags: list[str], agent_text: str) -> float:
     return max(float(np.dot(np.asarray(v, dtype="float32"), agent_vec)) for v in vecs[1:])
 
 
-def build_agent_text(description: str, oasf_domains, oasf_skills) -> str:
-    """Agent-domain text for the cosine check (description + expanded OASF)."""
-    return agent_domain_text(description or "", list(oasf_domains or []), list(oasf_skills or []))
+def _scale_heuristic(scale: str) -> str | None:
+    """No-agent-signal fallback, decided by scale alone (mirrors benchmark
+    stage3_domain.scale_heuristic): unbounded -> quantity; star5/star10/binary ->
+    quality; else (pct100) -> None (escalate to LLM)."""
+    s = (scale or "").strip().lower()
+    if s == "unbounded":
+        return "quantity"
+    if s in ("star5", "star10", "binary"):
+        return "quality"
+    return None
+
+
+def build_agent_text(description: str, oasf_domains, oasf_skills, service_names=None, tags=None) -> str:
+    """Canonical agent-domain text for the cosine check: description + expanded
+    OASF domains/skills + (non-generic) service names + tags. Empty components
+    contribute nothing; returns '' only when every component is empty."""
+    return agent_domain_text_full(
+        description or "",
+        list(oasf_domains or []),
+        list(oasf_skills or []),
+        list(service_names or []),
+        list(tags or []),
+    )
 
 
 def classify_three_tier(
@@ -178,21 +199,39 @@ def classify_three_tier(
     scale: str,
     value_norm: float,
     agent_text: str,
-    value_decimals: int = 0,
     llm_classify_fn: Callable[[], tuple[str, float, str, str | None]] | None = None,
 ) -> ThreeTierResult:
     """Run Stage 0.5 -> 2 -> 3 -> 4 for an "others" record. `encoder` is the
     bge-small SentenceTransformer used for the agent-domain cosine check.
-    Returns ThreeTierResult with feature inferred from tag signals and classifier source.
+    Returns ThreeTierResult with feature derived from FAISS in_domain signal.
     """
     t1, t2 = (tag1 or "").strip(), (tag2 or "").strip()
     sc = (scale or "").strip().lower()
     is_unbounded = sc == "unbounded"
     clf = load_svm()
+    agent_str = (agent_text or "").strip()
+    tags = [t for t in (t1, t2) if t]
 
-    def _result(cat, conf, reason, source):
-        feat = _infer_feature(t1, t2, cat, source)
+    # Early domain cosine: compute for ALL records so Stage 2 (SVM quality gate)
+    # records also receive an in_domain signal for feature assignment, not only
+    # Stage 3/4 records. Adds one encoder.encode() call (~20 ms on BGE-small/CPU)
+    # for Stage 2 records; negligible vs LLM latency for Stage 4 records.
+    if agent_str and tags:
+        best_cos = _domain_best_cos(encoder, tags, agent_str)
+        in_domain: bool | None = best_cos > THRESH_IN_DOMAIN
+    else:
+        best_cos = 0.0
+        in_domain = None
+
+    def _result(cat: str, conf: float, reason: str, source: str) -> ThreeTierResult:
+        feat = _infer_feature(t1, t2, cat, in_domain)
         return ThreeTierResult(cat, float(max(0.0, min(1.0, conf))), reason, source, feature=feat)
+
+    def _llm_with_feature(reason_prefix: str) -> ThreeTierResult:
+        """Call LLM fallback and override its feature with our in_domain signal."""
+        res = _llm_resolve(llm_classify_fn, reason_prefix)
+        res.feature = _infer_feature(t1, t2, res.category, in_domain)
+        return res
 
     # Stage 2 — one-directional BGE quality gate. May only ever assert "quality";
     # never used to assert "quantity" (unbounded is structurally never quality,
@@ -204,14 +243,14 @@ def classify_three_tier(
         return _result("quality", quality_prob, f"svm quality_prob={quality_prob:.2f}", "three_tier_svm")
 
     # Stage 3 — agent-domain cosine (Stage 2 not confident).
-    tags = [t for t in (t1, t2) if t]
-    agent_text = (agent_text or "").strip()
+    # No agent-domain signal at all -> scale_heuristic (matches benchmark
+    # run13.resolve); only when the heuristic abstains do we escalate to the LLM.
+    if not agent_str:
+        sh = _scale_heuristic(sc)
+        if sh is not None:
+            return _result(sh, 0.60, f"scale_heuristic:{sc}", "three_tier_scale")
+        return _llm_with_feature("no_agent_metadata")
 
-    # No agent metadata -> straight to the LLM (no scale heuristic, no ML default).
-    if not agent_text:
-        return _llm_resolve(llm_classify_fn, "no_agent_metadata")
-
-    best_cos = _domain_best_cos(encoder, tags, agent_text)
     if best_cos > THRESH_IN_DOMAIN:
         if is_unbounded:
             # Safe to resolve here: the scale convention makes "quantity" structural,
@@ -221,7 +260,7 @@ def classify_three_tier(
         # escalation. Asserting "quality" here by default, or "quantity" via a
         # low-confidence tie-break, were both audited and found less accurate
         # than escalating (see module docstring) — never guess in this branch.
-        return _llm_resolve(llm_classify_fn, f"in_domain_bounded_low_conf cos={best_cos:.3f},prob={quality_prob:.2f}")
+        return _llm_with_feature(f"in_domain_bounded_low_conf cos={best_cos:.3f},prob={quality_prob:.2f}")
 
     # Stage 4 — borderline/not-in-domain cosine -> LLM (no ML default).
-    return _llm_resolve(llm_classify_fn, f"borderline_cos={best_cos:.3f}")
+    return _llm_with_feature(f"borderline_cos={best_cos:.3f}")

@@ -56,8 +56,10 @@ from sklearn.metrics import classification_report, f1_score
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from benchmarks.pipeline_3tier import rule_classify
-from benchmarks.pipeline_3tier_v2 import LLM_MODEL, enrich_gold_with_agent_meta, llm_classify, load_gold
-from benchmarks.stage3_domain import DomainClassifier, _load_model, scale_heuristic
+from benchmarks.pipeline_3tier_v2 import LLM_MODEL, _agent_meta, enrich_gold_with_agent_meta, llm_classify, load_gold
+from benchmarks.stage3_domain import _load_model, scale_heuristic, THRESH_IN_DOMAIN
+from shared.context_builder import domain_service_names
+from shared.oasf_enrich import agent_domain_text_full
 from shared.types import LLM_OUTPUT_CATEGORIES
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -135,7 +137,45 @@ def main() -> None:
         vec = cache[f"{tag.strip().lower()} {scale.strip().lower()}"]
         return float(clf.predict_proba([vec])[0][quality_idx])
 
-    dc = DomainClassifier()
+    # Stage-3 agent-domain cosine computed LIVE (no prebuilt FAISS index) from the
+    # SAME canonical agent text production uses (three_tier.build_agent_text):
+    # description + OASF domains/skills + (non-generic) service names + tags.
+    # agent_vec cached per agent_key; bare-tag vec cached across records.
+    _agent_vec_cache: dict[str, "np.ndarray | None"] = {}
+    _tag_vec_cache: dict[str, "np.ndarray"] = {}
+
+    def _agent_vec(agent_key: str):
+        if agent_key in _agent_vec_cache:
+            return _agent_vec_cache[agent_key]
+        meta = _agent_meta(agent_key)
+        desc = meta.summary or meta.description or ""
+        text = agent_domain_text_full(
+            desc, meta.oasf_domains, meta.oasf_skills,
+            domain_service_names(meta.services or []), meta.tags,
+        )
+        vec = None
+        if text.strip():
+            vec = model.encode([text], normalize_embeddings=True)[0].astype("float32")
+        _agent_vec_cache[agent_key] = vec
+        return vec
+
+    def _tag_vec(tag: str):
+        if tag not in _tag_vec_cache:
+            _tag_vec_cache[tag] = model.encode([tag], normalize_embeddings=True)[0].astype("float32")
+        return _tag_vec_cache[tag]
+
+    def live_in_domain(tag1: str, tag2: str, agent_key: str) -> tuple[bool | None, float]:
+        """Live replacement for DomainClassifier.check_in_domain: None when the
+        agent has no domain signal at all (→ scale_heuristic), else best
+        cos(tag, agent_vec) > THRESH_IN_DOMAIN."""
+        vec = _agent_vec(agent_key)
+        if vec is None:
+            return None, 0.0
+        tags = [t for t in (tag1.strip(), tag2.strip()) if t]
+        if not tags:
+            return None, 0.0
+        best = max(float(np.dot(_tag_vec(t), vec)) for t in tags)
+        return best > THRESH_IN_DOMAIN, best
 
     # --- Precompute everything threshold-independent ---
     print("Precomputing per-record signals...")
@@ -144,7 +184,6 @@ def main() -> None:
         tag1 = str(row.get("tag1", "") or "").strip()
         tag2 = str(row.get("tag2", "") or "").strip()
         scale = str(row.get("value_scale", "") or "").strip()
-        decimals = int(row.get("value_decimals", 0) or 0)
         agent_key = str(row.get("agent_key", "") or "")
         has_meta = bool(row.get("has_agent_metadata"))
         is_unbounded = scale.lower() == "unbounded"
@@ -168,12 +207,13 @@ def main() -> None:
         quality_prob = max(p1, p2) if tag2 else p1
         rec["quality_prob"] = quality_prob
 
-        # Domain cosine uses the same tag-only embedding convention as every
-        # other run (DomainClassifier), NOT the tag+scale text used for the SVM.
-        in_domain, best_cos = dc.check_in_domain(tag1, tag2, agent_key)
+        # Domain cosine uses the same tag-only embedding convention as production
+        # (live cos against the canonical full agent text), NOT the tag+scale text
+        # used for the SVM.
+        in_domain, best_cos = live_in_domain(tag1, tag2, agent_key)
         rec["in_domain"] = in_domain
         rec["best_cos"] = best_cos
-        rec["scale_h"] = scale_heuristic(scale, decimals)
+        rec["scale_h"] = scale_heuristic(scale)
         records.append(rec)
 
     n_total = len(records)

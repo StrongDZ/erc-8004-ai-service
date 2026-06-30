@@ -26,7 +26,10 @@ class ClassifyRequest(BaseModel):
 
     tag1: str = ""
     tag2: str = ""
-    value_norm: float = 0.0
+    # None = no value present (distinct from a genuine normalised 0.0, which is a
+    # real signal: binary fail / unbounded). Keeps the embedding query in the same
+    # space as the corpus, which emits "value=0.00" for present zeros only.
+    value_norm: float | None = None
     scale: str = ""
     offchain_content: str = ""
     endpoint: str = ""

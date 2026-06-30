@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-"""Build a tag-pair/chain stratified subsample of the existing hand-labelled gold pool.
+"""Build a stratified subsample of the existing hand-labelled gold pool.
 
-The full pool (data/labelled/pure_others_to_label.csv, N=2,206) is concentrated:
-chain 8453 alone accounts for ~68% of records, and a handful of tag-pairs (e.g.
-"tip"/"agent" with 284 records) dominate the rest. This script does NOT draw new
-records or request new human labels -- every record here already has a gold
-human_label from the original annotation pass. It caps each (chain_id, tag1,
-tag2) cluster at --cap records (seeded random choice within the cluster) so no
-single chain or tag-pair can dominate the evaluation, producing a more
-representative subsample of the same gold pool for a robustness check against
-the full-pool numbers reported in Chapter 6 (tab:bench-bge).
+Cluster key: (tag1, tag2, scale, agent_key) — the four factors that determine
+classifier output. tag1/tag2/scale drive the rule-based layers; agent_key fixes
+the offchain content seen by the LLM fallback. Two records that share all four
+values will always receive the same classification, so keeping more than one per
+cluster adds no new evaluation signal. The default cap is therefore 1
+(deduplication), producing the smallest representative subsample.
+
+This script does NOT draw new records or request new human labels — every record
+here already has a gold human_label from the original annotation pass.
 
 Usage:
     cd erc-8004-ai-service
     .venv/bin/python3 -m benchmarks.stratified_resample_gold \\
         --gold data/labelled/pure_others_to_label.csv \\
-        --cap 5 --seed 42 \\
-        --out data/labelled/pure_others_stratified_cap5.csv
+        --cap 1 --seed 42 \\
+        --out data/labelled/pure_others_stratified_dedup.csv
 """
 from __future__ import annotations
 
@@ -27,11 +27,12 @@ from pathlib import Path
 import pandas as pd
 
 
-def cluster_key(row: pd.Series) -> tuple[str, str, str]:
-    chain_id = str(row["feedback_id"]).split(":")[0]
-    tag1 = str(row.get("tag1") or "").strip().lower()
-    tag2 = str(row.get("tag2") or "").strip().lower()
-    return (chain_id, tag1, tag2)
+def cluster_key(row: pd.Series) -> tuple[str, str, str, str]:
+    tag1  = str(row.get("tag1")      or "").strip().lower()
+    tag2  = str(row.get("tag2")      or "").strip().lower()
+    scale = str(row.get("scale")     or "").strip().lower()
+    agent = str(row.get("agent_key") or "").strip().lower()
+    return (tag1, tag2, scale, agent)
 
 
 def main() -> None:
@@ -56,7 +57,7 @@ def main() -> None:
 
     out = df.loc[sorted(kept_idx)].drop(columns=["_cluster"])
     n_clusters = df["_cluster"].nunique()
-    print(f"Source pool: N={len(df)}, {n_clusters} (chain, tag1, tag2) clusters")
+    print(f"Source pool: N={len(df)}, {n_clusters} (tag1, tag2, scale, agent_key) clusters")
     print(f"Stratified subsample (cap={args.cap}): N={len(out)} ({len(out) / len(df) * 100:.1f}% of pool)")
     print(out["human_label"].value_counts())
 

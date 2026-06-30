@@ -105,6 +105,8 @@ def load_hand_labelled_csv(gold_csv: Path) -> pd.DataFrame:
     if "gold_label" not in raw.columns or raw["gold_label"].astype(str).str.strip().eq("").all():
         if "gold_label_from_category" in raw.columns:
             raw["gold_label"] = raw["gold_label_from_category"]
+        elif "human_label" in raw.columns:
+            raw["gold_label"] = raw["human_label"]
     raw["label"] = (
         raw["gold_label"]
         .astype(str)

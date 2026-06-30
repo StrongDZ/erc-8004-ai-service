@@ -294,8 +294,7 @@ LAYER 1 — junk  (STRICT — default to the next layer when uncertain)
     (e.g. "xkqzw", bare UUID, bare digit string "666" with no measurement label).
   • Spam: promo URLs (https://, t.me/), vote-rigging phrases ("top 1 rank", "#1 agent").
   • Developer test/placeholder strings: tags containing patterns that signal a non-production
-    entry such as _test, -test, test_, debug, placeholder, sample, or a bare small integer
-    ("10", "0") with no units when paired with no meaningful second tag.
+    entry such as _test, -test, test_, debug, placeholder, sample
   NEVER junk: protocol/technology names, crypto project names, domain actions, community names,
   agent tool names, slang used as genuine feedback, informal words that still describe agent
   behaviour, or any tag where you can construct a plausible agent evaluation meaning.

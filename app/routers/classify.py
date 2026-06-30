@@ -15,10 +15,10 @@ import time
 
 from fastapi import APIRouter
 
-from shared.context_builder import build_user_message, endpoint_matches_services
+from shared.context_builder import build_user_message, domain_service_names, endpoint_matches_services
 from shared.knn_classifier import KNNCorpus, feedback_embed_text
 from shared.oasf_enrich import agent_domain_text
-from shared.three_tier import DOMAIN_EMBED_MODEL, build_agent_text, classify_three_tier
+from shared.three_tier import DOMAIN_EMBED_MODEL, SVM_QUALITY_THRESH, build_agent_text, classify_three_tier
 from shared.types import LLM_OUTPUT_CATEGORIES, AgentMeta, Category, FeedbackRecord
 
 from ..deps import (
@@ -30,8 +30,42 @@ from ..deps import (
     get_ollama_client,
 )
 from ..schemas import ClassifyRequest, ClassifyResponse
+from .. import cache
 
 router = APIRouter()
+
+# Cache-key namespace: derived purely from server config (default model + SVM
+# threshold) so a model swap or threshold change auto-invalidates stale entries
+# with no wipe. Payload-shape or classification-LOGIC changes are NOT auto-
+# captured — drop the classify_cache collection on deploy for those.
+_CACHE_VERSION = f"{DEFAULT_OLLAMA_MODEL}|tau{SVM_QUALITY_THRESH}"
+
+
+def _cache_payload(req: ClassifyRequest) -> dict:
+    """The fields that actually determine the verdict, at the granularity that
+    matters: tag pair + scale + the agent's domain identity. Lists are sorted so
+    ordering differences never cause spurious misses.
+
+    Deliberately excluded (measured low-value on this corpus): value_norm
+    (inflates keys ~1.2x without changing the category), endpoint and offchain
+    (no empty-tag records depend on offchain; junk/endpoint cases negligible),
+    and model/prompt_version (constant on the 3tier path; already in the version
+    tag). The agent's contribution to the verdict is fully captured by its
+    description + OASF + (non-generic) services + tags, so hashing those is
+    equivalent to keying on agent identity — but it auto-invalidates when the
+    agent's metadata changes (which a raw agent_id would not)."""
+    return {
+        "tag1": (req.tag1 or "").strip().lower(),
+        "tag2": (req.tag2 or "").strip().lower(),
+        "scale": (req.scale or "").strip().lower(),
+        "agent": {
+            "desc": (req.agent_description or "").strip(),
+            "services": sorted(domain_service_names(req.agent_services)),
+            "oasf_domains": sorted(req.agent_oasf_domains),
+            "oasf_skills": sorted(req.agent_oasf_skills),
+            "tags": sorted(t.strip().lower() for t in req.agent_tags if (t or "").strip()),
+        },
+    }
 
 
 def _to_agent_meta(req: ClassifyRequest) -> AgentMeta:
@@ -62,7 +96,7 @@ def _to_feedback_record(req: ClassifyRequest) -> FeedbackRecord:
         tag1=req.tag1,
         tag2=req.tag2,
         endpoint=req.endpoint,
-        value=str(req.value_norm),
+        value=("" if req.value_norm is None else str(req.value_norm)),
         value_decimals=0,
         value_scale=req.scale,
         feedback_parsed={"offchain": req.offchain_content} if req.offchain_content else None,
@@ -151,11 +185,14 @@ def _knn_classify(req: ClassifyRequest) -> ClassifyResponse:
 
 def _linear_classify(req: ClassifyRequest) -> ClassifyResponse:
     """Route model='linear' to the logistic-regression head (same corpus as kNN)."""
+    # Same value+scale tokens as the shared KNN corpus this head trains on.
     text = feedback_embed_text(
         req.tag1 or "",
         req.tag2 or "",
         req.endpoint or "",
         req.offchain_content or "",
+        value_norm=req.value_norm,
+        score_tier=req.scale,
     )
     clf = get_linear_classifier()
     result = clf.classify(text)
@@ -224,11 +261,14 @@ def _ensemble_classify(req: ClassifyRequest) -> ClassifyResponse:
             feature=llm_result.feature,
         )
 
+    # Same value+scale tokens as the KNN corpus the ensemble hands off to.
     text = feedback_embed_text(
         req.tag1 or "",
         req.tag2 or "",
         req.endpoint or "",
         req.offchain_content or "",
+        value_norm=req.value_norm,
+        score_tier=req.scale,
     )
     corpus: KNNCorpus = get_knn_classifier()
     knn_result = corpus.classify(text)
@@ -246,8 +286,10 @@ def _three_tier_classify(req: ClassifyRequest) -> ClassifyResponse:
     """Route model='3tier' to the production 3-tier classifier (per-tag SVM +
     agent-domain cosine + LLM fallback). Rule Stage 0/1 already ran on the Go side."""
     t0 = time.time()
+    service_names = domain_service_names(req.agent_services)
     agent_text = build_agent_text(
-        req.agent_description, req.agent_oasf_domains, req.agent_oasf_skills
+        req.agent_description, req.agent_oasf_domains, req.agent_oasf_skills,
+        service_names, list(req.agent_tags),
     )
     encoder = get_embedder(DOMAIN_EMBED_MODEL)
 
@@ -265,7 +307,7 @@ def _three_tier_classify(req: ClassifyRequest) -> ClassifyResponse:
         tag1=req.tag1,
         tag2=req.tag2,
         scale=req.scale,
-        value_norm=req.value_norm,
+        value_norm=req.value_norm if req.value_norm is not None else 0.0,
         agent_text=agent_text,
         llm_classify_fn=llm_fallback,
     )
@@ -287,7 +329,22 @@ def _three_tier_classify(req: ClassifyRequest) -> ClassifyResponse:
 
 @router.post("/classify", response_model=ClassifyResponse)
 def classify(req: ClassifyRequest) -> ClassifyResponse:
+    """Deterministic-memoised entry point: cache lookup -> dispatch -> store.
 
+    The verdict is a pure function of the request + server config, so a cache
+    hit returns the exact response the dispatch would produce (no F1 impact).
+    Best-effort: cache (Mongo) errors fall through to a normal classification.
+    """
+    key = cache.cache_key(_CACHE_VERSION, _cache_payload(req))
+    hit = cache.cache_get(key)
+    if hit is not None:
+        return ClassifyResponse(**hit)
+    resp = _classify_uncached(req)
+    cache.cache_set(key, resp.model_dump())
+    return resp
+
+
+def _classify_uncached(req: ClassifyRequest) -> ClassifyResponse:
     model_lower = (req.model or "").lower()
     if model_lower in ("3tier", "three_tier"):
         return _three_tier_classify(req)

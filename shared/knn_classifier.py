@@ -87,8 +87,7 @@ def feedback_embed_text(
     tag2: str,
     endpoint: str = "",
     offchain_content: str = "",
-    value_norm: float = 0.0,
-    value_decimals: int = 0,
+    value_norm: float | None = None,
     score_tier: str = "",
 ) -> str:
     """Flat embedding text for one feedback record (no agent context needed).
@@ -99,9 +98,11 @@ def feedback_embed_text(
     same embedding space.
 
     score_tier is the scale tier string (binary/star5/star10/pct100/unbounded)
-    computed by AssignTier. value_decimals signals how many decimal places the
-    on-chain value was stored with — a key discriminator: decimals=0 + large
-    value → pct100/quantity; decimals=18 → fractional ETH-like value → unbounded.
+    computed by AssignTier; it already encodes the decimals-derived
+    quantity↔quality discriminator, so the raw decimals count is not embedded.
+    value_norm is the normalised value in [-1, 1]; pass None when no value is
+    present so a genuine 0.0 (binary fail / unbounded) stays distinguishable
+    from an absent value — None emits no token, 0.0 emits "value=0.00".
     """
     ep = _host(endpoint) if (endpoint or "").strip() else ""
     off = (offchain_content or "")[:300]
@@ -109,8 +110,7 @@ def feedback_embed_text(
         f"tag1={tag1.strip()}" if (tag1 or "").strip() else "",
         f"tag2={tag2.strip()}" if (tag2 or "").strip() else "",
         f"scale={score_tier}" if (score_tier or "").strip() else "",
-        f"decimals={value_decimals}" if value_decimals else "",
-        f"value={value_norm:.2f}" if value_norm != 0.0 else "",
+        f"value={value_norm:.2f}" if value_norm is not None else "",
         f"endpoint={ep}" if ep else "",
         f"offchain={off}" if off else "",
     ]
@@ -181,14 +181,15 @@ class KNNCorpus:
                     off = json.dumps(fp, ensure_ascii=False)
                 except Exception:
                     pass
-            val_norm, val_dec, score_tier = _row_value_fields(row.to_dict())
+            val_norm, _val_dec, score_tier = _row_value_fields(row.to_dict())
+            # A non-empty tier means the value parsed (present, possibly 0.0);
+            # an empty tier means absent/unparseable → pass None (no value token).
             texts.append(feedback_embed_text(
                 row.get("tag1", "") or "",
                 row.get("tag2", "") or "",
                 row.get("endpoint", "") or "",
                 off,
-                value_norm=val_norm,
-                value_decimals=val_dec,
+                value_norm=(val_norm if score_tier else None),
                 score_tier=score_tier,
             ))
 

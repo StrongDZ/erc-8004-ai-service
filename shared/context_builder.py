@@ -213,12 +213,19 @@ def feedback_block(
     """
     tag1 = (fb.tag1 or "").strip()
     tag2 = (fb.tag2 or "").strip()
+    # Raw on-chain value is an untrusted string; a non-numeric value must not
+    # abort the whole batch (the live API path is safe because value is set from
+    # value_norm, but the benchmark path feeds raw Mongo values).
+    try:
+        raw_value = float(fb.value) if fb.value else 0.0
+    except (TypeError, ValueError):
+        raw_value = 0.0
     out: dict = {
         "tag1": tag1,
         "tag2": tag2,
         "comment": fb.feedback_parsed.get("comment", "") if fb.feedback_parsed else "",
         "scale": fb.value_scale or "",
-        "value": (float(fb.value) if fb.value else 0.0) / 10 ** fb.value_decimals,
+        "value": raw_value / 10 ** (fb.value_decimals or 0),
     }
     if agent is not None:
         matched = find_matched_service(fb.endpoint or "", agent.services or [])

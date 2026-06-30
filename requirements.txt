@@ -11,27 +11,52 @@ anyio==4.13.0
     #   httpx
     #   starlette
     #   watchfiles
+blis==1.3.3
+    # via thinc
+catalogue==2.0.10
+    # via
+    #   spacy
+    #   srsly
+    #   thinc
 certifi==2026.4.22
     # via
     #   httpcore
     #   httpx
+    #   requests
+charset-normalizer==3.4.7
+    # via requests
 click==8.4.0
     # via
     #   typer
     #   uvicorn
+cloudpathlib==0.24.0
+    # via weasel
 colorama==0.4.6 ; sys_platform == 'win32'
     # via
     #   click
     #   tqdm
     #   uvicorn
+    #   wasabi
+confection==1.3.3
+    # via
+    #   spacy
+    #   thinc
+    #   weasel
 cuda-bindings==13.2.0 ; sys_platform == 'linux'
     # via torch
 cuda-pathfinder==1.5.4 ; sys_platform == 'linux'
     # via cuda-bindings
 cuda-toolkit==13.0.2 ; sys_platform == 'linux'
     # via torch
+cymem==2.0.13
+    # via
+    #   preshed
+    #   spacy
+    #   thinc
 dnspython==2.8.0
     # via pymongo
+faiss-cpu==1.14.3
+    # via erc8004-ai
 fastapi==0.136.1
     # via erc8004-ai
 filelock==3.29.0
@@ -56,6 +81,7 @@ httpx==0.28.1
     # via
     #   erc8004-ai
     #   huggingface-hub
+    #   weasel
 huggingface-hub==1.15.0
     # via
     #   sentence-transformers
@@ -65,8 +91,11 @@ idna==3.15
     # via
     #   anyio
     #   httpx
+    #   requests
 jinja2==3.1.6
-    # via torch
+    # via
+    #   spacy
+    #   torch
 joblib==1.5.3
     # via scikit-learn
 markdown-it-py==4.2.0
@@ -77,15 +106,24 @@ mdurl==0.1.2
     # via markdown-it-py
 mpmath==1.3.0
     # via sympy
+murmurhash==1.0.15
+    # via
+    #   preshed
+    #   spacy
+    #   thinc
 networkx==3.6.1
     # via torch
 numpy==2.4.5
     # via
+    #   blis
     #   erc8004-ai
+    #   faiss-cpu
     #   pandas
     #   scikit-learn
     #   scipy
     #   sentence-transformers
+    #   spacy
+    #   thinc
     #   transformers
 nvidia-cublas==13.1.1.3 ; sys_platform == 'linux'
     # via
@@ -130,14 +168,26 @@ nvidia-nvtx==13.0.85 ; sys_platform == 'linux'
     # via cuda-toolkit
 packaging==26.2
     # via
+    #   faiss-cpu
     #   huggingface-hub
+    #   spacy
+    #   thinc
     #   transformers
+    #   weasel
 pandas==3.0.3
     # via erc8004-ai
+preshed==3.0.13
+    # via
+    #   spacy
+    #   thinc
 pyarrow==24.0.0
     # via erc8004-ai
 pydantic==2.13.4
-    # via fastapi
+    # via
+    #   fastapi
+    #   spacy
+    #   thinc
+    #   weasel
 pydantic-core==2.46.4
     # via pydantic
 pygments==2.20.0
@@ -157,6 +207,8 @@ pyyaml==6.0.3
     #   uvicorn
 regex==2026.5.9
     # via transformers
+requests==2.34.2
+    # via spacy
 rich==15.0.0
     # via typer
 safetensors==0.7.0
@@ -172,15 +224,33 @@ scipy==1.17.1
 sentence-transformers==5.5.0
     # via erc8004-ai
 setuptools==81.0.0
-    # via torch
+    # via
+    #   spacy
+    #   thinc
+    #   torch
 shellingham==1.5.4
     # via typer
 six==1.17.0
     # via python-dateutil
+smart-open==7.6.1
+    # via weasel
+spacy==3.8.14
+    # via erc8004-ai
+spacy-legacy==3.0.12
+    # via spacy
+spacy-loggers==1.0.5
+    # via spacy
+srsly==2.5.3
+    # via
+    #   spacy
+    #   thinc
+    #   weasel
 starlette==1.0.1
     # via fastapi
 sympy==1.14.0
     # via torch
+thinc==8.3.13
+    # via spacy
 threadpoolctl==3.6.0
     # via scikit-learn
 tokenizers==0.22.2
@@ -194,6 +264,7 @@ tqdm==4.67.3
     #   erc8004-ai
     #   huggingface-hub
     #   sentence-transformers
+    #   spacy
     #   transformers
 transformers==5.8.1
     # via sentence-transformers
@@ -202,7 +273,9 @@ triton==3.7.0 ; sys_platform == 'linux'
 typer==0.25.1
     # via
     #   huggingface-hub
+    #   spacy
     #   transformers
+    #   weasel
 typing-extensions==4.15.0
     # via
     #   anyio
@@ -220,11 +293,22 @@ typing-inspection==0.4.2
     #   pydantic
 tzdata==2026.2 ; sys_platform == 'emscripten' or sys_platform == 'win32'
     # via pandas
+urllib3==2.7.0
+    # via requests
 uvicorn==0.47.0
     # via erc8004-ai
 uvloop==0.22.1 ; platform_python_implementation != 'PyPy' and sys_platform != 'cygwin' and sys_platform != 'win32'
     # via uvicorn
+wasabi==1.1.3
+    # via
+    #   spacy
+    #   thinc
+    #   weasel
 watchfiles==1.2.0
     # via uvicorn
+weasel==1.0.0
+    # via spacy
 websockets==16.0
     # via uvicorn
+wrapt==2.2.1
+    # via smart-open

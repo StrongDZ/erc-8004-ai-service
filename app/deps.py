@@ -20,7 +20,7 @@ from shared.prompts import (
 )
 
 
-DEFAULT_OLLAMA_MODEL = os.getenv("AI_SERVICE_DEFAULT_MODEL", "qwen2.5:3b")
+DEFAULT_OLLAMA_MODEL = os.getenv("AI_SERVICE_DEFAULT_MODEL", "qwen2.5:7b-instruct")
 DEFAULT_EMBED_MODEL = os.getenv("AI_SERVICE_DEFAULT_EMBED_MODEL", "BAAI/bge-base-en-v1.5")
 
 
